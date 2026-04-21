@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 from dotenv import load_dotenv
+import shutil
 from pathlib import Path
 from datetime import datetime
 from langchain_openai import ChatOpenAI
@@ -319,6 +320,136 @@ def analyze_image(path: str) -> str:
         return error
 
 
+@tool
+def sort_images_by_type(directory: str) -> str:
+    """
+    Sort images in a directory into folders by file type (png, jpg, etc).
+    """
+
+    try:
+        p = Path(directory)
+
+        if not p.exists():
+            return f"Directory not found: {directory}"
+
+        moved = []
+
+        for file in p.iterdir():
+            if file.is_file():
+                ext = file.suffix.lower().replace(".", "")
+
+                if ext in ["png", "jpg", "jpeg"]:
+                    target_dir = p / ext
+                    target_dir.mkdir(exist_ok=True)
+
+                    target_path = target_dir / file.name
+                    shutil.copy2(file, target_path)
+
+                    moved.append(f"{file.name} → {ext}/")
+
+        return "\n".join(moved) if moved else "No images found."
+
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@tool
+def sort_images_by_content(directory: str, categories: list[str]) -> str:
+    """
+    Analyze images and sort them into user-defined categories.
+    Always includes an 'other' category for low-confidence matches.
+    """
+
+    import shutil
+    from pathlib import Path
+
+    try:
+        if not categories or len(categories) > 4:
+            return "Error: You must provide between 1 and 4 categories."
+
+        # Normalize + enforce 'other'
+        categories = [c.lower().strip() for c in categories]
+        if "other" not in categories:
+            categories.append("other")
+
+        p = Path(directory)
+
+        if not p.exists():
+            return f"Directory not found: {directory}"
+
+        results = []
+        category_list = ", ".join([c for c in categories if c != "other"])
+
+        for file in p.iterdir():
+
+            if file.suffix.lower() not in [".png", ".jpg", ".jpeg"]:
+                continue
+
+            base64_image = encode_image(str(file))
+
+            # 🔥 Ask for structured + confidence output
+            response = llm.invoke([
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"Classify this image into ONE of these categories:\n"
+                                f"{category_list}\n\n"
+                                f"Return a JSON object like:\n"
+                                f'{{"category": "<category>", "confidence": <0-1>}}\n\n'
+                                f"If the image does not clearly match one category, return:\n"
+                                f'{{"category": "other", "confidence": <low_value>}}\n'
+                                f"Only return JSON."
+                            )
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ])
+
+            raw = response.content.strip()
+
+            # 🔒 Safe parsing
+            import json
+            try:
+                parsed = json.loads(raw)
+                label = parsed.get("category", "other").lower()
+                confidence = float(parsed.get("confidence", 0))
+            except:
+                label = "other"
+                confidence = 0
+
+            # 🔥 Enforce "squishy" behavior
+            if label not in categories or label == "other" or confidence < 0.7:
+                label = "other"
+
+            target_dir = p / label
+            target_dir.mkdir(exist_ok=True)
+
+            target_path = target_dir / file.name
+            shutil.copy2(file, target_path)
+
+            results.append(f"{file.name} → {label}/ (confidence: {confidence:.2f})")
+
+        # 👇 Explain behavior to user explicitly
+        summary_note = (
+            "\n\nNote: Images are only placed into specific categories when the model is confident. "
+            "Otherwise, they are placed into the 'other' folder."
+        )
+
+        return ("\n".join(results) if results else "No images processed.") + summary_note
+
+    except Exception as e:
+        return f"Error: {e}"
+
+
 # -----------------------------
 # LLM
 # -----------------------------
@@ -342,7 +473,16 @@ prompt = ChatPromptTemplate.from_messages([
     Always assume the base directory is the working directory unless otherwise specified.
     When searching, use tools like find_directory.
     You can list files along with metadata using list_files_with_metadata. 
-    Use this instead of calling file_metadata repeatedly."""),
+    Use this instead of calling file_metadata repeatedly.
+    You can organize files using tools:
+    - sort_images_by_type for file extensions
+    - sort_images_by_content for AI-based classification
+    Use these tools instead of manually iterating over files.
+    When organizing images:
+    - Ask the user to specify, or infer categories from the request
+    - Pass categories explicitly into sort_images_by_content
+    - Do not invent extra categories beyond what the user asked
+    - If the user asks for more than 4 categories, request that they reduce it to at most 4"""),
     ("human", "{input}"),
     ("placeholder", "{agent_scratchpad}")
 ])
@@ -350,10 +490,12 @@ prompt = ChatPromptTemplate.from_messages([
 tools = [
     read_file,
     write_file,
-    list_files,
+    list_files_with_metadata,
     file_metadata,
     analyze_image,
-    list_files_with_metadata
+    find_directory,
+    sort_images_by_type,
+    sort_images_by_content
 ]
 
 agent = create_openai_functions_agent(llm, tools, prompt)
@@ -362,7 +504,8 @@ agent_executor = AgentExecutor(
     agent=agent,
     tools=tools,
     verbose=False,
-    return_intermediate_steps=True
+    return_intermediate_steps=True,
+    max_iterations=20
 )
 
 
