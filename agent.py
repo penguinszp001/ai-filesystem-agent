@@ -2,6 +2,8 @@ import os
 import json
 import uuid
 from dotenv import load_dotenv
+from pathlib import Path
+from datetime import datetime
 from langchain_openai import ChatOpenAI
 from langchain.tools import tool
 from langchain.agents import create_openai_functions_agent, AgentExecutor
@@ -30,6 +32,14 @@ def log_event(event: dict):
 
     with open(log_filename, "a") as f:
         f.write(json.dumps(event) + "\n")
+
+
+def format_bytes(size: int) -> str:
+    for unit in ["B", "KB", "MB", "GB"]:
+        if size < 1024:
+            return f"{size:.2f}{unit}"
+        size /= 1024
+    return f"{size:.2f}TB"
 
 
 # -----------------------------
@@ -130,6 +140,53 @@ def list_files(directory: str) -> str:
         return error
 
 
+@tool
+def file_metadata(path: str) -> str:
+    """
+    Get metadata about a file: size, created time, modified time.
+    """
+    try:
+        p = Path(path)
+
+        if not p.exists():
+            return f"File not found: {path}"
+
+        stats = p.stat()
+
+        created = datetime.fromtimestamp(stats.st_ctime)
+        modified = datetime.fromtimestamp(stats.st_mtime)
+        size = stats.st_size
+
+        result = {
+            "path": str(p.resolve()),
+            "size_bytes": size,
+            "size_readable": format_bytes(size),
+            "created": created.isoformat(),
+            "modified": modified.isoformat()
+        }
+
+        log_event({
+            "type": "tool_call",
+            "tool": "file_metadata",
+            "input": {"path": path},
+            "output": result
+        })
+
+        return str(result)
+
+    except Exception as e:
+        error = f"Error: {e}"
+
+        log_event({
+            "type": "tool_call_error",
+            "tool": "file_metadata",
+            "input": {"path": path},
+            "error": error
+        })
+
+        return error
+
+
 # -----------------------------
 # LLM
 # -----------------------------
@@ -141,31 +198,50 @@ llm = ChatOpenAI(
 )
 
 
-# -----------------------------
-# Prompt
-# -----------------------------
-
 prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a helpful assistant that can read files, summarize them, and write outputs."),
+    ("system",
+     "You are a file assistant. You can read, list, and summarize files."),
     ("human", "{input}"),
     ("placeholder", "{agent_scratchpad}")
 ])
 
-
-# -----------------------------
-# Agent
-# -----------------------------
-
-tools = [read_file, write_file, list_files]
+tools = [read_file, write_file, list_files, file_metadata]
 
 agent = create_openai_functions_agent(llm, tools, prompt)
 
 agent_executor = AgentExecutor(
     agent=agent,
     tools=tools,
-    verbose=True,
+    verbose=False,
     return_intermediate_steps=True
 )
+
+
+# -----------------------------
+# MAIN ENTRYPOINT FOR WEB
+# -----------------------------
+
+def run_agent(query: str, directory: str):
+    """
+    Called by web server.
+    """
+
+    log_event({
+        "type": "run_start",
+        "input": query,
+        "directory": directory
+    })
+
+    result = agent_executor.invoke({
+        "input": query
+    })
+
+    log_event({
+        "type": "run_end",
+        "output": result["output"]
+    })
+
+    return result["output"]
 
 
 # -----------------------------
