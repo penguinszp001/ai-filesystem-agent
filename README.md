@@ -1,77 +1,85 @@
-# Minimal Agentic File Processor
+# Local File Agent UI
 
-This project is a simple Level 2 AI agent built with LangChain and OpenAI.
+A lightweight local AI agent that can read, summarize, and write files
+through a simple web interface.
 
-It demonstrates how an LLM can:
-- Read local files
-- Summarize content
-- Write new files
-- Dynamically explore directories
-- Use tools with structured inputs
+This project combines: 
+- LangChain-based tool-using agent 
+- FastAPI
+backend server 
+- Simple browser UI (no frontend build tools) 
+- Structured JSONL logging system 
+- Local filesystem access
 
----
+------------------------------------------------------------------------
 
-## 🚀 Features
+# What it does
 
-### 1. File Interaction
-- Read individual files (`read_file`)
-- Write output files (`write_file`)
-- List directory contents (`list_files`)
+You can open a browser, type a request like:
 
-### 2. Structured Tool Inputs (Pydantic)
-The `write_file` tool uses a schema:
-- filename
-- content
+-   "List all files in <directory>"
+-   "Summarize all text files"
+-   "Read file1.txt and explain it"
+-   "Create a summary file of everything"
 
-This avoids parsing errors and improves reliability.
+The agent will: 
+1. Inspect files in the project directory 
+2. Read file
+contents 
+3. Summarize using an LLM 
+4. Optionally write output files 
+5. Return a response in the browser UI
+------------------------------------------------------------------------
+# Setup
 
----
+## 1. Install dependencies
 
-### 3. Directory Scanning
-The agent can:
-- Look inside a folder
-- Identify files
-- Process them sequentially
-
-Example:
-> "Read all files in a folder and summarize them"
-
----
-
-### 4. Agent Reasoning Logs
-The agent runs with:
-- `verbose=True`
-- `return_intermediate_steps=True`
-
-This allows you to see:
-- which tools were used
-- what inputs were passed
-- what outputs were returned
-
-This is critical for debugging and understanding behavior.
-
----
-
-## 🧠 Architecture
-
-User Input  
-→ LLM decides next step  
-→ Tool execution (file read/write/list)  
-→ Observation returned  
-→ Repeat until task complete  
-
----
-
-## 📁 Files
-
-- `agent.py` → main agent logic
-- `test_openai.py` → API test script
-- `requirements.txt`
-- `.env` → contains OPEN_AI_API_KEY
-
----
-
-## ⚙️ Setup
-
-```bash
+``` bash
 pip install -r requirements.txt
+```
+
+------------------------------------------------------------------------
+
+## 2. Create `.env` file
+
+Copy `.env.example`
+
+OR
+
+create new `.env` with `OPEN_AI_API_KEY=your_openai_api_key_here`
+
+------------------------------------------------------------------------
+
+## 3. Run the server
+
+``` bash
+uvicorn server:app --reload
+```
+
+------------------------------------------------------------------------
+
+## 4. Open the UI
+
+http://127.0.0.1:8000
+
+------------------------------------------------------------------------
+# Tools
+
+-   read_file
+-   write_file
+-   list_files
+
+------------------------------------------------------------------------
+
+# Logging
+
+Every run is stored in: `logs/run_<timestamp>_<uuid>.jsonl`
+
+------------------------------------------------------------------------
+
+# Features
+
+-   local execution
+-   structured logs
+-   simple UI
+-   file-based agent
