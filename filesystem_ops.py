@@ -137,13 +137,30 @@ def list_directories(*, base_directory: str, path: str = ".") -> dict[str, Any]:
     )
 
 
-def find_directory(*, base_directory: str, name: str, path: str = ".") -> dict[str, Any]:
+def find_directory(
+    *,
+    base_directory: str,
+    name: str | None = None,
+    directory_name: str | None = None,
+    folder_name: str | None = None,
+    path: str = ".",
+) -> dict[str, Any]:
     target = _resolve_path(base_directory, path)
 
     if not target.exists() or not target.is_dir():
         return _result("find_directory", False, f"Directory not found: {target}", path=str(target), matches=[])
 
-    query = name.strip().lower()
+    requested_name = name or directory_name or folder_name
+    if not requested_name:
+        return _result(
+            "find_directory",
+            False,
+            "Missing required search name. Provide 'name' (or alias 'directory_name').",
+            path=str(target),
+            matches=[],
+        )
+
+    query = requested_name.strip().lower()
     matches: list[str] = []
 
     for candidate in target.rglob("*"):
@@ -153,9 +170,9 @@ def find_directory(*, base_directory: str, name: str, path: str = ".") -> dict[s
     return _result(
         "find_directory",
         True,
-        f"Found {len(matches)} matching directories for '{name}'",
+        f"Found {len(matches)} matching directories for '{requested_name}'",
         path=str(target),
-        name=name,
+        name=requested_name,
         matches=sorted(matches),
         count=len(matches),
     )
@@ -231,6 +248,18 @@ OPERATION_REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
 
 
 def execute_step(base_directory: str, operation: str, args: dict[str, Any]) -> dict[str, Any]:
+    args = dict(args or {})
+
+    if operation == "find_directory":
+        if "name" not in args:
+            for alias in ("directory_name", "folder_name", "query"):
+                if alias in args:
+                    args["name"] = args.pop(alias)
+                    break
+
+        if "path" not in args and "directory" in args:
+            args["path"] = args.pop("directory")
+
     func = OPERATION_REGISTRY.get(operation)
     if func is None:
         return _result(operation, False, f"Unknown operation: {operation}", args=args)
