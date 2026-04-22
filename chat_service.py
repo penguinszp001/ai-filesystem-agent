@@ -1,5 +1,5 @@
 from collections import deque
-from agent import agent_executor, run_agent
+from agent import run_agent
 import os
 
 # store last 5 messages

@@ -3,12 +3,12 @@
 A lightweight local AI agent that can read, summarize, and write files
 through a simple web interface.
 
-This project combines: 
-- LangChain-based tool-using agent 
-- FastAPI
-backend server 
-- Simple browser UI (no frontend build tools) 
-- Structured JSONL logging system 
+This project combines:
+- LLM-based planning + summarization
+- Deterministic Python filesystem execution layer
+- FastAPI backend server
+- Simple browser UI (no frontend build tools)
+- Structured JSONL logging system
 - Local filesystem access
 
 ------------------------------------------------------------------------
@@ -63,11 +63,20 @@ uvicorn server:app --reload
 http://127.0.0.1:8000
 
 ------------------------------------------------------------------------
-# Tools
+# Filesystem operations
 
--   read_file
--   write_file
+-   make_directory
+-   make_file
+-   move_file
+-   move_directory
+-   copy_file
+-   copy_directory
+-   delete_file
+-   delete_directory
 -   list_files
+-   list_directories
+
+The LLM now creates a plan, Python executes operations deterministically, and the LLM summarizes results.
 
 ------------------------------------------------------------------------
 
