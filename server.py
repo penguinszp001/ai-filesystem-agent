@@ -1,38 +1,40 @@
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
-import os
+from fastapi.staticfiles import StaticFiles
 
-from agent import run_agent
+from pydantic import BaseModel
+
+from chat_service import run_chat
+import os
 
 app = FastAPI()
 
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 
 class QueryRequest(BaseModel):
     query: str
-    directory: str
 
 
 @app.get("/")
 def home():
-    with open("static/index.html", "r") as f:
+    with open("static/index.html") as f:
         return HTMLResponse(f.read())
 
 
-@app.post("/query")
-def query(req: QueryRequest):
+@app.get("/info")
+def info():
+    return {"directory": BASE_DIR}
 
-    # Run agent synchronously for now (simple version)
-    result = run_agent(req.query, req.directory)
+
+@app.post("/chat")
+def chat(req: QueryRequest):
+
+    result = run_chat(req.query)
 
     return {
         "status": "done",
-        "result": result
-    }
-
-@app.get("/info")
-def info():
-    return {
-        "directory": BASE_DIR
+        "response": result
     }

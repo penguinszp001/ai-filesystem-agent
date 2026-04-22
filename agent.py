@@ -4,7 +4,6 @@ import uuid
 from dotenv import load_dotenv
 import shutil
 from pathlib import Path
-from datetime import datetime
 from langchain_openai import ChatOpenAI
 from langchain.tools import tool
 from langchain.agents import create_openai_functions_agent, AgentExecutor
@@ -12,8 +11,19 @@ from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel
 from datetime import datetime
 import base64
+from functools import wraps
+import time
 from PIL import Image
 from io import BytesIO
+
+
+#TODO Right now the agent is:
+#TODO
+#TODO “LLM + tools”
+#TODO
+#TODO What you need is:
+#TODO
+#TODO “LLM proposes → Python enforces → Python verifies → LLM summarizes”
 
 load_dotenv()
 api_key = os.getenv("OPEN_AI_API_KEY")
@@ -23,9 +33,7 @@ api_key = os.getenv("OPEN_AI_API_KEY")
 # -----------------------------
 
 RUN_ID = str(uuid.uuid4())
-
 os.makedirs("logs", exist_ok=True)
-
 log_filename = f"logs/run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{RUN_ID}.jsonl"
 
 
@@ -37,6 +45,52 @@ def log_event(event: dict):
     with open(log_filename, "a") as f:
         f.write(json.dumps(event) + "\n")
 
+
+# -----------------------------
+# Logging Decorator
+# -----------------------------
+
+def logged_tool(name):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+
+            log_event({
+                "type": "tool_start",
+                "tool": name,
+                "input": kwargs
+            })
+
+            try:
+                result = func(*args, **kwargs)
+
+                log_event({
+                    "type": "tool_end",
+                    "tool": name,
+                    "input": kwargs,
+                    "output": str(result)[:2500]
+                })
+
+                return result
+
+            except Exception as e:
+                error = f"Error: {e}"
+
+                log_event({
+                    "type": "tool_error",
+                    "tool": name,
+                    "input": kwargs,
+                    "error": error
+                })
+
+                return error
+
+        return wrapper
+    return decorator
+
+# -----------------------------
+# Helpers
+# -----------------------------
 
 def format_bytes(size: int) -> str:
     for unit in ["B", "KB", "MB", "GB"]:
@@ -51,37 +105,20 @@ def encode_image(path: str) -> str:
         return base64.b64encode(f.read()).decode("utf-8")
 
 
+def truncate(text, max_len=500):
+    return text if len(text) <= max_len else text[:max_len] + "...[truncated]"
+
+
 # -----------------------------
 # Tools
 # -----------------------------
 
 @tool
+@logged_tool("read_file")
 def read_file(path: str) -> str:
     """Read a file from disk."""
-    try:
-        with open(path, "r") as f:
-            content = f.read()
-
-        log_event({
-            "type": "tool_result",
-            "tool": "read_file",
-            "input": {"path": path},
-            "output": content
-        })
-
-        return content
-
-    except Exception as e:
-        error = f"Error: {e}"
-
-        log_event({
-            "type": "tool_result_error",
-            "tool": "read_file",
-            "input": {"path": path},
-            "error": error
-        })
-
-        return error
+    with open(path, "r") as f:
+        return f.read()
 
 
 class WriteFileInput(BaseModel):
@@ -90,204 +127,289 @@ class WriteFileInput(BaseModel):
 
 
 @tool(args_schema=WriteFileInput)
+@logged_tool("write_file")
 def write_file(filename: str, content: str) -> str:
     """Write content to a file."""
-    try:
-        with open(filename, "w") as f:
-            f.write(content)
-
-        message = f"File '{filename}' written."
-
-        log_event({
-            "type": "tool_call",
-            "tool": "write_file",
-            "input": {"filename": filename, "content": content},
-            "output": message
-        })
-
-        return message
-
-    except Exception as e:
-        error = f"Error: {e}"
-
-        log_event({
-            "type": "tool_call_error",
-            "tool": "write_file",
-            "input": {"filename": filename, "content": content},
-            "error": error
-        })
-
-        return error
+    with open(filename, "w") as f:
+        f.write(content)
+    return f"File '{filename}' written."
 
 
 @tool
-def list_files(directory: str) -> str:
-    """List all files in a directory."""
-    try:
-        files = os.listdir(directory)
-        result = "\n".join(files)
-
-        log_event({
-            "type": "tool_call",
-            "tool": "list_files",
-            "input": {"directory": directory},
-            "output": result
-        })
-
-        return result
-
-    except Exception as e:
-        error = f"Error: {e}"
-
-        log_event({
-            "type": "tool_call_error",
-            "tool": "list_files",
-            "input": {"directory": directory},
-            "error": error
-        })
-
-        return error
+@logged_tool("create_directory")
+def create_directory(path: str) -> str:
+    """Create a new directory."""
+    Path(path).mkdir(parents=True, exist_ok=True)
+    return f"Created directory {path}"
 
 
 @tool
+@logged_tool("move_file")
+def move_file(source_path: str, destination_path: str) -> str:
+    """Move a file from source_path to destination_path."""
+
+    try:
+        src = Path(source_path)
+        dst = Path(destination_path)
+
+        if not src.exists():
+            return f"Source file does not exist: {source_path}"
+
+        dst.parent.mkdir(parents=True, exist_ok=True)
+
+        shutil.move(str(src), str(dst))
+
+        return f"Moved file: {src} → {dst}"
+
+    except Exception as e:
+        return f"Error moving file: {e}"
+
+
+@tool
+@logged_tool("move_directory")
+def move_directory(source_path: str, destination_path: str) -> str:
+    """Move a directory from source_path to destination_path."""
+
+    try:
+        src = Path(source_path)
+        dst = Path(destination_path)
+
+        if not src.exists():
+            return f"Source directory does not exist: {source_path}"
+
+        if not src.is_dir():
+            return f"Source is not a directory: {source_path}"
+
+        dst.parent.mkdir(parents=True, exist_ok=True)
+
+        shutil.move(str(src), str(dst))
+
+        return f"Moved directory: {src} → {dst}"
+
+    except Exception as e:
+        return f"Error moving directory: {e}"
+
+
+@tool
+@logged_tool("verify_directory_state")
+def verify_directory_state(directory: str) -> dict:
+    """Return actual filesystem state after operations."""
+    p = Path(directory)
+
+    return {
+        "folders": [x.name for x in p.iterdir() if x.is_dir()],
+        "files": [x.name for x in p.iterdir() if x.is_file()],
+        "folder_count": len([x for x in p.iterdir() if x.is_dir()]),
+        "file_count": len([x for x in p.iterdir() if x.is_file()])
+    }
+
+
+@tool
+@logged_tool("list_directory")
+def list_directory(directory: str) -> dict:
+    """
+    List contents of a directory, clearly separating files and folders.
+    """
+
+    p = Path(directory)
+
+    if not p.exists():
+        return f"Directory not found: {directory}"
+
+    files = []
+    folders = []
+
+    for item in p.iterdir():
+        if item.is_dir():
+            folders.append(item.name)
+        else:
+            files.append(item.name)
+
+    result = {
+        "directory": directory,
+        "folders": folders,
+        "files": files,
+        "folder_count": len(folders),
+        "file_count": len(files)
+    }
+
+    return result
+
+
+@tool
+@logged_tool("find_directory")
 def find_directory(name: str, start_path: str = ".") -> str:
     """
     Search for directories by name starting from a base path.
     Returns matching directory paths.
     """
-
     matches = []
 
-    try:
-        for root, dirs, _ in os.walk(start_path):
-            for d in dirs:
-                if name.lower() in d.lower():
-                    full_path = os.path.join(root, d)
-                    matches.append(full_path)
+    for root, dirs, _ in os.walk(start_path):
+        for d in dirs:
+            if name.lower() in d.lower():
+                matches.append(os.path.join(root, d))
 
-        if not matches:
-            result = f"No directories found matching '{name}'"
-        else:
-            result = "\n".join(matches)
-
-        log_event({
-            "type": "tool_call",
-            "tool": "find_directory",
-            "input": {"name": name, "start_path": start_path},
-            "output": result
-        })
-
-        return result
-
-    except Exception as e:
-        error = f"Error: {e}"
-
-        log_event({
-            "type": "tool_call_error",
-            "tool": "find_directory",
-            "input": {"name": name, "start_path": start_path},
-            "error": error
-        })
-
-        return error
+    return "\n".join(matches) if matches else f"No directories found matching '{name}'"
 
 
 @tool
+@logged_tool("file_metadata")
 def file_metadata(path: str) -> str:
-    """
-    Get metadata about a file: size, created time, modified time.
-    """
-    try:
-        p = Path(path)
+    """Get metadata about a file: size, created time, modified time."""
+    p = Path(path)
+    stats = p.stat()
 
-        if not p.exists():
-            return f"File not found: {path}"
+    result = {
+        "path": str(p.resolve()),
+        "size": format_bytes(stats.st_size),
+        "created": datetime.fromtimestamp(stats.st_ctime).isoformat(),
+        "modified": datetime.fromtimestamp(stats.st_mtime).isoformat()
+    }
 
-        stats = p.stat()
-
-        created = datetime.fromtimestamp(stats.st_ctime)
-        modified = datetime.fromtimestamp(stats.st_mtime)
-        size = stats.st_size
-
-        result = {
-            "path": str(p.resolve()),
-            "size_bytes": size,
-            "size_readable": format_bytes(size),
-            "created": created.isoformat(),
-            "modified": modified.isoformat()
-        }
-
-        log_event({
-            "type": "tool_call",
-            "tool": "file_metadata",
-            "input": {"path": path},
-            "output": result
-        })
-
-        return str(result)
-
-    except Exception as e:
-        error = f"Error: {e}"
-
-        log_event({
-            "type": "tool_call_error",
-            "tool": "file_metadata",
-            "input": {"path": path},
-            "error": error
-        })
-
-        return error
+    return str(result)
 
 
 @tool
-def list_files_with_metadata(directory: str) -> str:
-    """
-    List all files in a directory with metadata (size, modified time).
-    """
+@logged_tool("list_files_with_metadata")
+def list_files_with_metadata(directory: str) -> list:
+    """List all files in a directory with metadata (size, modified time)."""
 
-    try:
-        results = []
+    results = []
+    files = os.listdir(directory)
 
-        for name in os.listdir(directory):
-            full_path = os.path.join(directory, name)
+    for i, name in enumerate(files):
 
-            if os.path.isfile(full_path):
-                stats = os.stat(full_path)
+        full_path = os.path.join(directory, name)
 
-                results.append({
-                    "name": name,
-                    "path": full_path,
-                    "size_bytes": stats.st_size,
-                    "modified": datetime.fromtimestamp(stats.st_mtime).isoformat()
+        if os.path.isfile(full_path):
+            stats = os.stat(full_path)
+
+            item = {
+                "name": name,
+                "size": format_bytes(stats.st_size),
+                "modified": datetime.fromtimestamp(stats.st_mtime).isoformat()
+            }
+
+            results.append(item)
+
+            # 🔥 per-loop logging
+            log_event({
+                "type": "file_processed",
+                "tool": "list_files_with_metadata",
+                "index": i,
+                "file": name
+            })
+
+    return results
+
+
+@tool
+@logged_tool("analyze_image")
+def analyze_image(path: str) -> str:
+    """Analyze an image using OpenAI vision model."""
+
+    base64_image = encode_image(path)
+
+    response = llm.invoke([
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this image."},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{base64_image}"
+                    }
+                }
+            ]
+        }
+    ])
+
+    return response.content
+
+
+@tool
+@logged_tool("sort_images_by_type")
+def sort_images_by_type(directory: str) -> str:
+    """Sort images in a directory into folders by file type (png, jpg, etc)."""
+
+    p = Path(directory)
+    moved = []
+
+    files = list(p.iterdir())
+
+    for i, file in enumerate(files):
+
+        if file.is_file():
+            ext = file.suffix.lower().replace(".", "")
+
+            if ext in ["png", "jpg", "jpeg"]:
+
+                target_dir = p / ext
+                target_dir.mkdir(exist_ok=True)
+
+                shutil.copy2(file, target_dir / file.name)
+
+                moved.append(f"{file.name} → {ext}/")
+
+                log_event({
+                    "type": "image_sorted",
+                    "tool": "sort_images_by_type",
+                    "file": file.name,
+                    "category": ext,
+                    "index": i
                 })
 
-        log_event({
-            "type": "tool_call",
-            "tool": "list_files_with_metadata",
-            "input": {"directory": directory},
-            "output": results
-        })
-
-        return str(results)
-
-    except Exception as e:
-        return f"Error: {e}"
+    return "\n".join(moved) if moved else "No images found."
 
 
 @tool
-def analyze_image(path: str) -> str:
+@logged_tool("sort_images_by_content")
+def sort_images_by_content(directory: str, categories: list[str]) -> str:
     """
-    Analyze an image using OpenAI vision model.
+    Analyze images and sort them into user-defined categories.
+    Always includes an 'other' category for low-confidence matches.
     """
+    if not categories or len(categories) > 4:
+        return "Error: Provide 1–4 categories."
 
-    try:
-        base64_image = encode_image(path)
+    categories = [c.lower().strip() for c in categories]
+    if "other" not in categories:
+        categories.append("other")
+
+    p = Path(directory)
+    results = []
+
+    category_list = ", ".join([c for c in categories if c != "other"])
+
+    files = list(p.iterdir())
+
+    for i, file in enumerate(files):
+
+        if file.suffix.lower() not in [".png", ".jpg", ".jpeg"]:
+            continue
+
+        base64_image = encode_image(str(file))
 
         response = llm.invoke([
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Describe this image in detail."},
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Classify this image into ONE of these categories:\n"
+                            f"{category_list}\n\n"
+                            f"Return a JSON object like:\n"
+                            f'{{"category": "<category>", "confidence": <0-1>}}\n\n'
+                            f"If the image does not clearly match one category, return:\n"
+                            f'{{"category": "other", "confidence": <low_value>}}\n\n'
+                            f"Be conservative. Only assign a category if it is a strong match.\n"
+                            f"Otherwise, use 'other'.\n\n"
+                            f"Only return valid JSON. No explanation."
+                        )
+                    },
                     {
                         "type": "image_url",
                         "image_url": {
@@ -298,156 +420,49 @@ def analyze_image(path: str) -> str:
             }
         ])
 
+        try:
+            parsed = json.loads(response.content)
+            label = parsed.get("category", "other").lower()
+            confidence = float(parsed.get("confidence", 0))
+        except:
+            label = "other"
+            confidence = 0
+
+        if label not in categories or confidence < 0.7:
+            label = "other"
+
+        target_dir = p / label
+        target_dir.mkdir(exist_ok=True)
+
+        shutil.copy2(file, target_dir / file.name)
+
+        results.append(f"{file.name} → {label}/ ({confidence:.2f})")
+
+        # 🔥 per-image logging
         log_event({
-            "type": "tool_call",
-            "tool": "analyze_image",
-            "input": {"path": path},
-            "output": response.content
+            "type": "image_classified",
+            "file": file.name,
+            "category": label,
+            "confidence": confidence,
+            "index": i
         })
 
-        return response.content
-
-    except Exception as e:
-        error = f"Error: {e}"
-
-        log_event({
-            "type": "tool_call_error",
-            "tool": "analyze_image",
-            "input": {"path": path},
-            "error": error
-        })
-
-        return error
+    return "\n".join(results)
 
 
 @tool
-def sort_images_by_type(directory: str) -> str:
-    """
-    Sort images in a directory into folders by file type (png, jpg, etc).
-    """
+def get_capabilities() -> str:
+    """Return what the agent is allowed to do."""
+    return json.dumps({
+        "can_read_files": True,
+        "can_write_files": True,
+        "can_list_directories": True,
+        "can_analyze_images": True,
+        "can_sort_files_by_type": True,
+        "can_sort_files_by_content": True,
+        "can_execute_system_commands": False
+    })
 
-    try:
-        p = Path(directory)
-
-        if not p.exists():
-            return f"Directory not found: {directory}"
-
-        moved = []
-
-        for file in p.iterdir():
-            if file.is_file():
-                ext = file.suffix.lower().replace(".", "")
-
-                if ext in ["png", "jpg", "jpeg"]:
-                    target_dir = p / ext
-                    target_dir.mkdir(exist_ok=True)
-
-                    target_path = target_dir / file.name
-                    shutil.copy2(file, target_path)
-
-                    moved.append(f"{file.name} → {ext}/")
-
-        return "\n".join(moved) if moved else "No images found."
-
-    except Exception as e:
-        return f"Error: {e}"
-
-
-@tool
-def sort_images_by_content(directory: str, categories: list[str]) -> str:
-    """
-    Analyze images and sort them into user-defined categories.
-    Always includes an 'other' category for low-confidence matches.
-    """
-
-    import shutil
-    from pathlib import Path
-
-    try:
-        if not categories or len(categories) > 4:
-            return "Error: You must provide between 1 and 4 categories."
-
-        # Normalize + enforce 'other'
-        categories = [c.lower().strip() for c in categories]
-        if "other" not in categories:
-            categories.append("other")
-
-        p = Path(directory)
-
-        if not p.exists():
-            return f"Directory not found: {directory}"
-
-        results = []
-        category_list = ", ".join([c for c in categories if c != "other"])
-
-        for file in p.iterdir():
-
-            if file.suffix.lower() not in [".png", ".jpg", ".jpeg"]:
-                continue
-
-            base64_image = encode_image(str(file))
-
-            # 🔥 Ask for structured + confidence output
-            response = llm.invoke([
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                f"Classify this image into ONE of these categories:\n"
-                                f"{category_list}\n\n"
-                                f"Return a JSON object like:\n"
-                                f'{{"category": "<category>", "confidence": <0-1>}}\n\n'
-                                f"If the image does not clearly match one category, return:\n"
-                                f'{{"category": "other", "confidence": <low_value>}}\n'
-                                f"Only return JSON."
-                            )
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{base64_image}"
-                            }
-                        }
-                    ]
-                }
-            ])
-
-            raw = response.content.strip()
-
-            # 🔒 Safe parsing
-            import json
-            try:
-                parsed = json.loads(raw)
-                label = parsed.get("category", "other").lower()
-                confidence = float(parsed.get("confidence", 0))
-            except:
-                label = "other"
-                confidence = 0
-
-            # 🔥 Enforce "squishy" behavior
-            if label not in categories or label == "other" or confidence < 0.7:
-                label = "other"
-
-            target_dir = p / label
-            target_dir.mkdir(exist_ok=True)
-
-            target_path = target_dir / file.name
-            shutil.copy2(file, target_path)
-
-            results.append(f"{file.name} → {label}/ (confidence: {confidence:.2f})")
-
-        # 👇 Explain behavior to user explicitly
-        summary_note = (
-            "\n\nNote: Images are only placed into specific categories when the model is confident. "
-            "Otherwise, they are placed into the 'other' folder."
-        )
-
-        return ("\n".join(results) if results else "No images processed.") + summary_note
-
-    except Exception as e:
-        return f"Error: {e}"
 
 
 # -----------------------------
@@ -464,39 +479,65 @@ llm = ChatOpenAI(
 prompt = ChatPromptTemplate.from_messages([
     ("system",
      """You are a file assistant working inside a local filesystem.
-    You can:
-    - read files
-    - list directories
-    - search for directories
-    - analyze images
-    
-    Always assume the base directory is the working directory unless otherwise specified.
-    When searching, use tools like find_directory.
-    You can list files along with metadata using list_files_with_metadata. 
-    Use this instead of calling file_metadata repeatedly.
-    You can organize files using tools:
-    - sort_images_by_type for file extensions
-    - sort_images_by_content for AI-based classification
-    Use these tools instead of manually iterating over files.
-    When organizing images:
-    - Ask the user to specify, or infer categories from the request
-    - Pass categories explicitly into sort_images_by_content
-    - Do not invent extra categories beyond what the user asked
-    - If the user asks for more than 4 categories, request that they reduce it to at most 4"""),
+BEFORE doing anything:
+ - Always call get_capabilities
+ - If the requested action is not supported, stop and inform the user
+     
+You can:
+- read files
+- list directories
+- search for directories
+- analyze images
+- create directories and files
+
+Always assume the base directory is the working directory unless otherwise specified.
+
+When searching, use tools like find_directory.
+
+You can list files along with metadata using list_files_with_metadata. 
+Use this instead of calling file_metadata repeatedly.
+
+When listing directory contents, use the list_directory tool.
+Do not infer folder names from raw file listings.
+When using tools that return structured data, never count items manually. If a tool provides a count field, you MUST use it directly.
+
+You can organize files using tools:
+- sort_images_by_type for file extensions
+- sort_images_by_content for AI-based classification
+
+Use these tools instead of manually iterating over files.
+
+When organizing images:
+- Ask the user to specify, or infer categories from the request
+- Pass categories explicitly into sort_images_by_content
+- Do not invent extra categories beyond what the user asked
+- If the user asks for more than 4 categories, request that they reduce it to at most 4
+
+For any operation that modifies files or directories, you MUST verify the result using a follow-up tool call like 
+verify_directory_state or returned structured output before responding to the user.
+"""),
     ("human", "{input}"),
     ("placeholder", "{agent_scratchpad}")
 ])
 
+
 tools = [
     read_file,
     write_file,
-    list_files_with_metadata,
-    file_metadata,
-    analyze_image,
+    move_file,
+    move_directory,
+    create_directory,
+    verify_directory_state,
+    list_directory,
     find_directory,
+    file_metadata,
+    list_files_with_metadata,
+    analyze_image,
     sort_images_by_type,
-    sort_images_by_content
+    sort_images_by_content,
+    get_capabilities
 ]
+
 
 agent = create_openai_functions_agent(llm, tools, prompt)
 
@@ -504,19 +545,15 @@ agent_executor = AgentExecutor(
     agent=agent,
     tools=tools,
     verbose=False,
-    return_intermediate_steps=True,
     max_iterations=20
 )
 
 
 # -----------------------------
-# MAIN ENTRYPOINT FOR WEB
+# Entry Point
 # -----------------------------
-
 def run_agent(query: str, directory: str):
-    """
-    Called by web server.
-    """
+    start_time = time.time()
 
     log_event({
         "type": "run_start",
@@ -524,56 +561,89 @@ def run_agent(query: str, directory: str):
         "directory": directory
     })
 
-    result = agent_executor.invoke({
-        "input": query
-    })
+    max_retries = 3
+    attempt = 0
+    output = None
 
-    log_event({
-        "type": "run_end",
-        "output": result["output"]
-    })
-
-    return result["output"]
-
-
-# -----------------------------
-# Run
-# -----------------------------
-
-if __name__ == "__main__":
-
-    query = """
-    Look in the folder 'data'.
-    Read all text files.
-    Summarize each one in 3 sentences.
-    Then write a combined summary to 'summarize_files.txt'.
-    """
-
-    # Log run start
-    log_event({
-        "type": "run_start",
-        "input": query
-    })
-
-    result = agent_executor.invoke({"input": query})
-
-    # Log final output
-    log_event({
-        "type": "run_end",
-        "output": result["output"]
-    })
-
-    # Log intermediate reasoning steps
-    for step in result["intermediate_steps"]:
-        action, observation = step
+    while attempt < max_retries:
+        attempt += 1
 
         log_event({
-            "type": "agent_action",
-            "tool": action.tool,
-            "stage": "planning",
-            "input": action.tool_input,
-            "output": observation
+            "type": "agent_attempt",
+            "attempt": attempt,
+            "input": query
         })
 
-    print("Run complete.")
-    print("Logs saved to:", log_filename)
+        # -----------------------------
+        # 1. Run main agent
+        # -----------------------------
+        result = agent_executor.invoke({
+            "input": query if attempt == 1 else f"""
+Previous attempt failed verification.
+
+Original request:
+{query}
+
+Previous result:
+{output}
+
+Fix the issue and try again.
+"""
+        })
+
+        output = result["output"]
+
+        log_event({
+            "type": "agent_output_raw",
+            "attempt": attempt,
+            "output": truncate(output)
+        })
+
+        # -----------------------------
+        # 2. Verification step
+        # -----------------------------
+        verification = agent_executor.invoke({
+            "input": f"""
+You are a filesystem verifier.
+
+Task:
+{query}
+
+Agent output:
+{output}
+
+Use tools (especially verify_directory_state or list_directory) to confirm correctness.
+
+Return ONLY:
+PASS or FAIL + short reason.
+"""
+        })["output"]
+
+        log_event({
+            "type": "verification",
+            "attempt": attempt,
+            "result": verification
+        })
+
+        # -----------------------------
+        # 3. Decide whether to retry
+        # -----------------------------
+        if "PASS" in verification.upper():
+            break
+
+    duration = time.time() - start_time
+
+    # 🔥 KEEP EXACTLY YOUR EXISTING LOGGING
+    log_event({
+        "type": "chat_turn",
+        "user_input": query,
+        "agent_output": truncate(output),
+        "duration_seconds": round(duration, 3)
+    })
+
+    log_event({
+        "type": "run_end",
+        "output": output
+    })
+
+    return output
