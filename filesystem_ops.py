@@ -250,6 +250,33 @@ OPERATION_REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
 def execute_step(base_directory: str, operation: str, args: dict[str, Any]) -> dict[str, Any]:
     args = dict(args or {})
 
+    if operation in {"make_directory", "delete_directory", "delete_file", "read_file"}:
+        if "path" not in args:
+            for alias in ("name", "directory", "target", "file", "filename"):
+                if alias in args:
+                    args["path"] = args.pop(alias)
+                    break
+
+    if operation in {"list_files", "list_directories"}:
+        if "path" not in args:
+            for alias in ("directory", "target"):
+                if alias in args:
+                    args["path"] = args.pop(alias)
+                    break
+
+    if operation == "make_file":
+        if "path" not in args:
+            for alias in ("filename", "name", "target"):
+                if alias in args:
+                    args["path"] = args.pop(alias)
+                    break
+
+        if "content" not in args:
+            for alias in ("text", "body"):
+                if alias in args:
+                    args["content"] = args.pop(alias)
+                    break
+
     if operation == "find_directory":
         if "name" not in args:
             for alias in ("directory_name", "folder_name", "query"):
@@ -259,6 +286,19 @@ def execute_step(base_directory: str, operation: str, args: dict[str, Any]) -> d
 
         if "path" not in args and "directory" in args:
             args["path"] = args.pop("directory")
+
+    if operation in {"move_file", "copy_file", "move_directory", "copy_directory"}:
+        if "source_path" not in args:
+            for alias in ("source", "from", "from_path"):
+                if alias in args:
+                    args["source_path"] = args.pop(alias)
+                    break
+
+        if "destination_path" not in args:
+            for alias in ("destination", "to", "to_path", "target"):
+                if alias in args:
+                    args["destination_path"] = args.pop(alias)
+                    break
 
     func = OPERATION_REGISTRY.get(operation)
     if func is None:

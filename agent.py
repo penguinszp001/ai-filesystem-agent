@@ -91,6 +91,8 @@ Rules:
 - Use only listed operation names.
 - Prefer relative paths under the base directory.
 - Keep steps minimal and deterministic.
+- For make_directory use args: {{"path": "<directory path>"}}.
+- For move_file/copy_file/move_directory/copy_directory use args: {{"source_path": "...", "destination_path": "..."}}.
 - For find_directory use args: {{"name": "<directory name>"}} and optional {{"path": "<search root>"}}.
 - Do NOT use aliases like "directory_name"; always emit "name".
 - If task is ambiguous or unsafe, return an empty steps list with an explanatory plan_summary.
