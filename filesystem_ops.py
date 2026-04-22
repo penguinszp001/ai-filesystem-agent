@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import base64
+import mimetypes
 import shutil
 from pathlib import Path
 from typing import Any, Callable
+
+MAX_TEXT_CHARS = 8000
+MAX_BINARY_PREVIEW_BYTES = 4096
 
 
 def _resolve_path(base_directory: str, path: str) -> Path:
@@ -132,6 +137,83 @@ def list_directories(*, base_directory: str, path: str = ".") -> dict[str, Any]:
     )
 
 
+def find_directory(*, base_directory: str, name: str, path: str = ".") -> dict[str, Any]:
+    target = _resolve_path(base_directory, path)
+
+    if not target.exists() or not target.is_dir():
+        return _result("find_directory", False, f"Directory not found: {target}", path=str(target), matches=[])
+
+    query = name.strip().lower()
+    matches: list[str] = []
+
+    for candidate in target.rglob("*"):
+        if candidate.is_dir() and query in candidate.name.lower():
+            matches.append(str(candidate.relative_to(Path(base_directory).resolve())))
+
+    return _result(
+        "find_directory",
+        True,
+        f"Found {len(matches)} matching directories for '{name}'",
+        path=str(target),
+        name=name,
+        matches=sorted(matches),
+        count=len(matches),
+    )
+
+
+def read_file(*, base_directory: str, path: str) -> dict[str, Any]:
+    target = _resolve_path(base_directory, path)
+
+    if not target.exists() or not target.is_file():
+        return _result("read_file", False, f"File not found: {target}", path=str(target))
+
+    mime_type, _ = mimetypes.guess_type(str(target))
+    mime_type = mime_type or "application/octet-stream"
+    raw = target.read_bytes()
+
+    if mime_type.startswith("text/") or target.suffix.lower() in {".md", ".py", ".json", ".yaml", ".yml", ".toml", ".csv", ".xml"}:
+        text = raw.decode("utf-8", errors="replace")
+        truncated = len(text) > MAX_TEXT_CHARS
+        visible_text = text[:MAX_TEXT_CHARS]
+        return _result(
+            "read_file",
+            True,
+            f"Read text file: {target}",
+            path=str(target),
+            file_kind="text",
+            mime_type=mime_type,
+            content=visible_text,
+            truncated=truncated,
+            total_chars=len(text),
+        )
+
+    if mime_type.startswith("image/"):
+        encoded = base64.b64encode(raw).decode("utf-8")
+        return _result(
+            "read_file",
+            True,
+            f"Read image file: {target}",
+            path=str(target),
+            file_kind="image",
+            mime_type=mime_type,
+            data_base64=encoded,
+            size_bytes=len(raw),
+        )
+
+    preview = base64.b64encode(raw[:MAX_BINARY_PREVIEW_BYTES]).decode("utf-8")
+    return _result(
+        "read_file",
+        True,
+        f"Read binary file metadata: {target}",
+        path=str(target),
+        file_kind="binary",
+        mime_type=mime_type,
+        size_bytes=len(raw),
+        preview_base64=preview,
+        preview_bytes=min(len(raw), MAX_BINARY_PREVIEW_BYTES),
+    )
+
+
 OPERATION_REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
     "make_directory": make_directory,
     "make_file": make_file,
@@ -143,6 +225,8 @@ OPERATION_REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
     "delete_directory": delete_directory,
     "list_files": list_files,
     "list_directories": list_directories,
+    "find_directory": find_directory,
+    "read_file": read_file,
 }
 
 

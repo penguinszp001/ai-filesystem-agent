@@ -98,6 +98,46 @@ Rules:
     return _parse_plan(response.content)
 
 
+def _add_image_interpretations(results: list[dict]) -> list[dict]:
+    """Interpret image read results using the LLM while preserving deterministic file ops."""
+    enriched: list[dict] = []
+
+    for result in results:
+        cloned = json.loads(json.dumps(result))
+        details = cloned.get("details", {})
+
+        if (
+            cloned.get("operation") == "read_file"
+            and cloned.get("ok")
+            and details.get("file_kind") == "image"
+            and details.get("data_base64")
+        ):
+            mime_type = details.get("mime_type", "image/png")
+            base64_data = details.get("data_base64")
+
+            response = llm.invoke([
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe and interpret this image briefly."},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{mime_type};base64,{base64_data}",
+                            },
+                        },
+                    ],
+                }
+            ])
+
+            details["interpretation"] = response.content
+            details["data_base64"] = "[omitted in summary payload]"
+
+        enriched.append(cloned)
+
+    return enriched
+
+
 def summarize_execution(query: str, plan: dict, results: list[dict]) -> str:
     prompt = f"""
 You are a concise assistant summarizing filesystem execution.
@@ -157,7 +197,8 @@ def run_agent(query: str, directory: str):
         })
         results.append(step_result)
 
-    output = summarize_execution(query=query, plan=plan, results=results)
+    enriched_results = _add_image_interpretations(results)
+    output = summarize_execution(query=query, plan=plan, results=enriched_results)
 
     duration = time.time() - start_time
 

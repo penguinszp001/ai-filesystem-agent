@@ -75,8 +75,11 @@ http://127.0.0.1:8000
 -   delete_directory
 -   list_files
 -   list_directories
+-   find_directory
+-   read_file
 
-The LLM now creates a plan, Python executes operations deterministically, and the LLM summarizes results.
+`read_file` supports text, image, and binary files with type-aware outputs.
+The LLM now creates a plan, Python executes operations deterministically, and the LLM summarizes results (including image interpretation when requested).
 
 ------------------------------------------------------------------------
 
