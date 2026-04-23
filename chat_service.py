@@ -1,6 +1,10 @@
 from collections import deque
-from agent import agent_executor, run_agent
+from pathlib import Path
+from agent import run_agent
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # store last 5 messages
 chat_history = deque(maxlen=5)
@@ -28,7 +32,10 @@ def run_chat(query: str):
     {query}
     """
 
-    result = run_agent(full_input, directory=os.getcwd())
+    configured_base_directory = os.getenv("ACCESSIBLE_FILEPATH", os.getcwd())
+    base_directory = str(Path(configured_base_directory).expanduser().resolve())
+
+    result = run_agent(full_input, directory=base_directory)
 
     output = result
 

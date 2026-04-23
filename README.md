@@ -3,12 +3,12 @@
 A lightweight local AI agent that can read, summarize, and write files
 through a simple web interface.
 
-This project combines: 
-- LangChain-based tool-using agent 
-- FastAPI
-backend server 
-- Simple browser UI (no frontend build tools) 
-- Structured JSONL logging system 
+This project combines:
+- LLM-based planning + summarization
+- Deterministic Python filesystem execution layer
+- FastAPI backend server
+- Simple browser UI (no frontend build tools)
+- Structured JSONL logging system
 - Local filesystem access
 
 ------------------------------------------------------------------------
@@ -46,7 +46,14 @@ Copy `.env.example`
 
 OR
 
-create new `.env` with `OPEN_AI_API_KEY=your_openai_api_key_here`
+create new `.env` with:
+
+```bash
+OPEN_AI_API_KEY=your_openai_api_key_here
+ACCESSIBLE_FILEPATH=.
+```
+
+Set `ACCESSIBLE_FILEPATH` to the directory the agent is allowed to access.
 
 ------------------------------------------------------------------------
 
@@ -63,11 +70,31 @@ uvicorn server:app --reload
 http://127.0.0.1:8000
 
 ------------------------------------------------------------------------
-# Tools
+# Filesystem operations
 
--   read_file
+-   make_directory
+-   make_file
 -   write_file
+-   move_file
+-   move_directory
+-   copy_file
+-   copy_directory
+-   delete_file
+-   delete_directory
 -   list_files
+-   list_directories
+-   find_directory
+-   read_file
+-   classify_images
+
+`read_file` supports text, image, and binary files with type-aware outputs.
+The LLM now creates a plan, Python executes operations deterministically, and the LLM summarizes results (including image interpretation when requested).
+
+`classify_images` can sort images into user-specified categories and routes low-confidence predictions to `other` using a confidence threshold.
+
+`read_file` image interpretation and `classify_images` are different modes:
+- interpretation: returns a rich natural-language description of one image.
+- classification: assigns an image to one of user-provided categories with confidence gating.
 
 ------------------------------------------------------------------------
 
