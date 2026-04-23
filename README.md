@@ -85,9 +85,11 @@ http://127.0.0.1:8000
 -   list_directories
 -   find_directory
 -   read_file
+-   get_metadata
 -   sort_images_by_content (LLM operation)
 
 `read_file` supports text, image, and binary files with type-aware outputs.
+`get_metadata` returns type, size, mime type, timestamps, and permissions for files or directories.
 The LLM now creates a plan, Python executes operations deterministically, and the LLM summarizes results (including image interpretation when requested).
 
 `sort_images_by_content` uses `read_file` + image interpretation text, then sorts images into requested categories. Low-confidence matches are sent to `other`.
