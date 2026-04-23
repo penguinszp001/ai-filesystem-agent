@@ -23,12 +23,14 @@ You can open a browser, type a request like:
 -   "Create a summary file of everything"
 
 The agent will: 
-1. Inspect files in the project directory 
+1. Inspect files in the configured operations directory
 2. Read file
 contents 
 3. Summarize using an LLM 
 4. Optionally write output files 
 5. Return a response in the browser UI
+
+The UI shows this operations directory, and file operations are restricted to it.
 ------------------------------------------------------------------------
 # Setup
 
@@ -46,7 +48,13 @@ Copy `.env.example`
 
 OR
 
-create new `.env` with `OPEN_AI_API_KEY=your_openai_api_key_here`
+create new `.env` with:
+
+`OPEN_AI_API_KEY=your_openai_api_key_here`
+
+`OPERATIONS_BASE_PATH=/absolute/path/you/want/users/to-operate-in`
+
+If `OPERATIONS_BASE_PATH` is omitted, the project directory is used.
 
 ------------------------------------------------------------------------
 

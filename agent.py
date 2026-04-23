@@ -17,6 +17,7 @@ from io import BytesIO
 
 load_dotenv()
 api_key = os.getenv("OPEN_AI_API_KEY")
+OPERATIONS_BASE_PATH = Path(os.getenv("OPERATIONS_BASE_PATH", ".")).resolve()
 
 # -----------------------------
 # Structured JSON Logger Setup
@@ -51,6 +52,23 @@ def encode_image(path: str) -> str:
         return base64.b64encode(f.read()).decode("utf-8")
 
 
+def resolve_in_base(path: str) -> Path:
+    """
+    Resolve a user-provided path inside the configured operations base path.
+    """
+    candidate = Path(path)
+    full_path = (OPERATIONS_BASE_PATH / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+
+    try:
+        full_path.relative_to(OPERATIONS_BASE_PATH)
+    except ValueError:
+        raise ValueError(
+            f"Path '{path}' is outside allowed base directory: {OPERATIONS_BASE_PATH}"
+        )
+
+    return full_path
+
+
 # -----------------------------
 # Tools
 # -----------------------------
@@ -59,13 +77,14 @@ def encode_image(path: str) -> str:
 def read_file(path: str) -> str:
     """Read a file from disk."""
     try:
-        with open(path, "r") as f:
+        resolved = resolve_in_base(path)
+        with open(resolved, "r") as f:
             content = f.read()
 
         log_event({
             "type": "tool_result",
             "tool": "read_file",
-            "input": {"path": path},
+            "input": {"path": path, "resolved_path": str(resolved)},
             "output": content
         })
 
@@ -93,15 +112,17 @@ class WriteFileInput(BaseModel):
 def write_file(filename: str, content: str) -> str:
     """Write content to a file."""
     try:
-        with open(filename, "w") as f:
+        resolved = resolve_in_base(filename)
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        with open(resolved, "w") as f:
             f.write(content)
 
-        message = f"File '{filename}' written."
+        message = f"File '{resolved}' written."
 
         log_event({
             "type": "tool_call",
             "tool": "write_file",
-            "input": {"filename": filename, "content": content},
+            "input": {"filename": filename, "resolved_path": str(resolved), "content": content},
             "output": message
         })
 
@@ -124,13 +145,14 @@ def write_file(filename: str, content: str) -> str:
 def list_files(directory: str) -> str:
     """List all files in a directory."""
     try:
-        files = os.listdir(directory)
+        resolved = resolve_in_base(directory)
+        files = os.listdir(resolved)
         result = "\n".join(files)
 
         log_event({
             "type": "tool_call",
             "tool": "list_files",
-            "input": {"directory": directory},
+            "input": {"directory": directory, "resolved_path": str(resolved)},
             "output": result
         })
 
@@ -159,7 +181,8 @@ def find_directory(name: str, start_path: str = ".") -> str:
     matches = []
 
     try:
-        for root, dirs, _ in os.walk(start_path):
+        resolved_start = resolve_in_base(start_path)
+        for root, dirs, _ in os.walk(resolved_start):
             for d in dirs:
                 if name.lower() in d.lower():
                     full_path = os.path.join(root, d)
@@ -173,7 +196,7 @@ def find_directory(name: str, start_path: str = ".") -> str:
         log_event({
             "type": "tool_call",
             "tool": "find_directory",
-            "input": {"name": name, "start_path": start_path},
+            "input": {"name": name, "start_path": start_path, "resolved_start_path": str(resolved_start)},
             "output": result
         })
 
@@ -198,7 +221,7 @@ def file_metadata(path: str) -> str:
     Get metadata about a file: size, created time, modified time.
     """
     try:
-        p = Path(path)
+        p = resolve_in_base(path)
 
         if not p.exists():
             return f"File not found: {path}"
@@ -220,7 +243,7 @@ def file_metadata(path: str) -> str:
         log_event({
             "type": "tool_call",
             "tool": "file_metadata",
-            "input": {"path": path},
+            "input": {"path": path, "resolved_path": str(p)},
             "output": result
         })
 
@@ -248,8 +271,9 @@ def list_files_with_metadata(directory: str) -> str:
     try:
         results = []
 
-        for name in os.listdir(directory):
-            full_path = os.path.join(directory, name)
+        resolved = resolve_in_base(directory)
+        for name in os.listdir(resolved):
+            full_path = os.path.join(resolved, name)
 
             if os.path.isfile(full_path):
                 stats = os.stat(full_path)
@@ -264,7 +288,7 @@ def list_files_with_metadata(directory: str) -> str:
         log_event({
             "type": "tool_call",
             "tool": "list_files_with_metadata",
-            "input": {"directory": directory},
+            "input": {"directory": directory, "resolved_path": str(resolved)},
             "output": results
         })
 
@@ -281,7 +305,8 @@ def analyze_image(path: str) -> str:
     """
 
     try:
-        base64_image = encode_image(path)
+        resolved = resolve_in_base(path)
+        base64_image = encode_image(str(resolved))
 
         response = llm.invoke([
             {
@@ -301,7 +326,7 @@ def analyze_image(path: str) -> str:
         log_event({
             "type": "tool_call",
             "tool": "analyze_image",
-            "input": {"path": path},
+            "input": {"path": path, "resolved_path": str(resolved)},
             "output": response.content
         })
 
@@ -327,7 +352,7 @@ def sort_images_by_type(directory: str) -> str:
     """
 
     try:
-        p = Path(directory)
+        p = resolve_in_base(directory)
 
         if not p.exists():
             return f"Directory not found: {directory}"
@@ -372,7 +397,7 @@ def sort_images_by_content(directory: str, categories: list[str]) -> str:
         if "other" not in categories:
             categories.append("other")
 
-        p = Path(directory)
+        p = resolve_in_base(directory)
 
         if not p.exists():
             return f"Directory not found: {directory}"
@@ -482,7 +507,8 @@ prompt = ChatPromptTemplate.from_messages([
     - Ask the user to specify, or infer categories from the request
     - Pass categories explicitly into sort_images_by_content
     - Do not invent extra categories beyond what the user asked
-    - If the user asks for more than 4 categories, request that they reduce it to at most 4"""),
+    - If the user asks for more than 4 categories, request that they reduce it to at most 4
+    All file operations must stay inside the configured operations base path.""" ),
     ("human", "{input}"),
     ("placeholder", "{agent_scratchpad}")
 ])
@@ -521,7 +547,8 @@ def run_agent(query: str, directory: str):
     log_event({
         "type": "run_start",
         "input": query,
-        "directory": directory
+        "directory": directory,
+        "operations_base_path": str(OPERATIONS_BASE_PATH)
     })
 
     result = agent_executor.invoke({
