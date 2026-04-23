@@ -1,8 +1,10 @@
 import json
+import mimetypes
 import os
 import time
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -37,7 +39,7 @@ llm = ChatOpenAI(
 )
 
 # Operations that are handled directly in this module (not by filesystem_ops).
-LLM_OPERATION_NAMES: list[str] = []
+LLM_OPERATION_NAMES: list[str] = ["inspect_images"]
 
 
 def _available_operations_text() -> str:
@@ -98,6 +100,8 @@ Rules:
 - For make_directory use args: {{"path": "<directory path>"}}.
 - For move_file/copy_file/move_directory/copy_directory use args: {{"source_path": "...", "destination_path": "..."}}.
 - For find_directory use args: {{"name": "<directory name>"}} and optional {{"path": "<search root>"}}.
+- For inspect_images use args: {{"path": "<file-or-directory path>", "question": "<what to detect or describe>"}}.
+- inspect_images is read-only and should be used before any image-based file moving decisions.
 - Do NOT use aliases like "directory_name"; always emit "name".
 - If task is ambiguous or unsafe, return an empty steps list with an explanatory plan_summary.
 """.strip()
@@ -152,6 +156,122 @@ def _add_image_interpretations(results: list[dict]) -> list[dict]:
     return enriched
 
 
+def _is_image_file(path: Path) -> bool:
+    mime_type, _ = mimetypes.guess_type(str(path))
+    return bool(mime_type and mime_type.startswith("image/"))
+
+
+def _inspect_images(base_directory: str, args: dict) -> dict:
+    path_arg = args.get("path", ".")
+    question = (args.get("question") or "Describe what is visible in the image.").strip()
+    resolved = Path(base_directory).resolve() / path_arg if not Path(path_arg).is_absolute() else Path(path_arg).resolve()
+    base = Path(base_directory).resolve()
+
+    if not (resolved == base or base in resolved.parents):
+        return {
+            "operation": "inspect_images",
+            "ok": False,
+            "message": f"Path '{path_arg}' resolves outside the allowed base directory.",
+            "details": {"path": str(resolved), "question": question},
+        }
+
+    if not resolved.exists():
+        return {
+            "operation": "inspect_images",
+            "ok": False,
+            "message": f"Path not found: {resolved}",
+            "details": {"path": str(resolved), "question": question},
+        }
+
+    image_paths: list[Path] = []
+    if resolved.is_file():
+        if _is_image_file(resolved):
+            image_paths = [resolved]
+    else:
+        image_paths = sorted(path for path in resolved.rglob("*") if path.is_file() and _is_image_file(path))
+
+    if not image_paths:
+        return {
+            "operation": "inspect_images",
+            "ok": True,
+            "message": "No image files found to inspect.",
+            "details": {"path": str(resolved), "question": question, "matches": [], "count": 0},
+        }
+
+    analyses: list[dict] = []
+    for image_path in image_paths:
+        relative_path = str(image_path.relative_to(base))
+        read_result = execute_step(base_directory, "read_file", {"path": relative_path})
+
+        if not read_result.get("ok"):
+            analyses.append({"path": relative_path, "ok": False, "error": read_result.get("message", "Unable to read image.")})
+            continue
+
+        details = read_result.get("details", {})
+        mime_type = details.get("mime_type", "image/png")
+        base64_data = details.get("data_base64", "")
+
+        response = llm.invoke([
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "You are analyzing a local image for filesystem automation. "
+                            "Answer with JSON only in this schema: "
+                            "{\"summary\": \"1-2 sentence visible description\", "
+                            "\"matches_request\": true/false, "
+                            "\"evidence\": \"short reason for your decision\"}. "
+                            f"Request to evaluate: {question}"
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime_type};base64,{base64_data}"},
+                    },
+                ],
+            }
+        ])
+
+        try:
+            parsed = json.loads(response.content.strip().strip("`").replace("json\n", "", 1))
+            analyses.append(
+                {
+                    "path": relative_path,
+                    "ok": True,
+                    "summary": parsed.get("summary", ""),
+                    "matches_request": bool(parsed.get("matches_request")),
+                    "evidence": parsed.get("evidence", ""),
+                }
+            )
+        except Exception:
+            analyses.append(
+                {
+                    "path": relative_path,
+                    "ok": True,
+                    "summary": str(response.content).strip(),
+                    "matches_request": False,
+                    "evidence": "Model response was not valid JSON; treated as non-match for safety.",
+                }
+            )
+
+    matches = [item["path"] for item in analyses if item.get("ok") and item.get("matches_request")]
+    return {
+        "operation": "inspect_images",
+        "ok": True,
+        "message": f"Inspected {len(analyses)} image(s); {len(matches)} matched the request.",
+        "details": {
+            "path": str(resolved),
+            "question": question,
+            "results": analyses,
+            "matches": matches,
+            "count": len(analyses),
+            "matches_count": len(matches),
+        },
+    }
+
+
 def summarize_execution(query: str, plan: dict, results: list[dict]) -> str:
     prompt = f"""
 You are a concise assistant summarizing filesystem execution.
@@ -198,7 +318,10 @@ def run_agent(query: str, directory: str):
         operation = step.get("operation", "")
         args = step.get("args", {})
 
-        step_result = execute_step(directory, operation, args)
+        if operation == "inspect_images":
+            step_result = _inspect_images(directory, args)
+        else:
+            step_result = execute_step(directory, operation, args)
         step_result["step_index"] = index
         step_result["reason"] = step.get("reason", "")
 
