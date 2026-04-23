@@ -3,6 +3,7 @@ import os
 import time
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -36,9 +37,146 @@ llm = ChatOpenAI(
     temperature=0,
 )
 
+# Operations that are handled directly in this module (not by filesystem_ops).
+LLM_OPERATION_NAMES = [
+    "sort_images_by_content",
+    # "classify_images",  # intentionally disabled
+]
+
 
 def _available_operations_text() -> str:
-    return "\n".join(f"- {name}" for name in OPERATION_REGISTRY.keys())
+    names = [*OPERATION_REGISTRY.keys(), *LLM_OPERATION_NAMES]
+    return "\n".join(f"- {name}" for name in names)
+
+
+def _pick_category_from_interpretation(interpretation: str, categories: list[str]) -> tuple[str, float]:
+    response = llm.invoke(
+        f"""
+Given this image interpretation:
+{interpretation}
+
+Choose the best matching category from this list: {', '.join(categories)}.
+Return ONLY valid JSON with this schema:
+{{"category": "<one category>", "confidence": <0_to_1>}}
+
+Be conservative with confidence.
+""".strip()
+    )
+
+    try:
+        parsed = json.loads(response.content)
+        label = str(parsed.get("category", "other")).strip().lower()
+        confidence = float(parsed.get("confidence", 0.0))
+        return label, confidence
+    except Exception:
+        return "other", 0.0
+
+
+def run_sort_images_by_content(*, base_directory: str, args: dict) -> dict:
+    relative_path = str(args.get("path", "."))
+    source_dir = (Path(base_directory) / relative_path).resolve()
+    root_dir = Path(base_directory).resolve()
+
+    if not (source_dir == root_dir or root_dir in source_dir.parents):
+        return {
+            "operation": "sort_images_by_content",
+            "ok": False,
+            "message": f"Path '{relative_path}' resolves outside the allowed base directory.",
+            "details": {"path": str(source_dir)},
+        }
+
+    if not source_dir.exists() or not source_dir.is_dir():
+        return {
+            "operation": "sort_images_by_content",
+            "ok": False,
+            "message": f"Directory not found: {source_dir}",
+            "details": {"path": str(source_dir)},
+        }
+
+    raw_categories = args.get("categories") or []
+    if not isinstance(raw_categories, list) or not raw_categories:
+        return {
+            "operation": "sort_images_by_content",
+            "ok": False,
+            "message": "Provide a non-empty 'categories' list.",
+            "details": {"categories": raw_categories},
+        }
+
+    categories = [str(c).strip().lower() for c in raw_categories if str(c).strip()]
+    if "other" not in categories:
+        categories.append("other")
+
+    threshold = float(args.get("confidence_threshold", 0.7))
+    mode = str(args.get("mode", "copy")).strip().lower()
+    mode = mode if mode in {"copy", "move"} else "copy"
+    transfer_operation = "move_file" if mode == "move" else "copy_file"
+
+    image_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    files = [file for file in source_dir.iterdir() if file.is_file() and file.suffix.lower() in image_suffixes]
+
+    sorted_results: list[dict] = []
+    for index, file in enumerate(files):
+        relative_source = str(file.relative_to(root_dir).as_posix())
+        read_result = execute_step(base_directory, "read_file", {"path": relative_source})
+        enriched = _add_image_interpretations([read_result])[0]
+
+        interpretation = enriched.get("details", {}).get("interpretation", "")
+        label, confidence = _pick_category_from_interpretation(interpretation, categories)
+
+        if label not in categories or confidence < threshold:
+            label = "other"
+
+        category_dir = str((Path(relative_path) / label).as_posix())
+        ensure_dir = execute_step(base_directory, "make_directory", {"path": category_dir})
+        if not ensure_dir.get("ok"):
+            return {
+                "operation": "sort_images_by_content",
+                "ok": False,
+                "message": f"Failed to create target directory '{category_dir}'.",
+                "details": {"error": ensure_dir},
+            }
+
+        destination_relative = str((Path(relative_path) / label / file.name).as_posix())
+        transfer = execute_step(
+            base_directory,
+            transfer_operation,
+            {
+                "source_path": relative_source,
+                "destination_path": destination_relative,
+            },
+        )
+
+        if not transfer.get("ok"):
+            return {
+                "operation": "sort_images_by_content",
+                "ok": False,
+                "message": f"Failed to {mode} file '{file.name}'.",
+                "details": {"error": transfer},
+            }
+
+        item = {
+            "file": file.name,
+            "category": label,
+            "confidence": round(confidence, 4),
+            "index": index,
+            "interpretation": interpretation,
+        }
+        sorted_results.append(item)
+        log_event({"type": "image_sorted_by_content", **item})
+
+    return {
+        "operation": "sort_images_by_content",
+        "ok": True,
+        "message": f"Sorted {len(sorted_results)} image(s) in {source_dir}",
+        "details": {
+            "path": str(source_dir),
+            "categories": categories,
+            "confidence_threshold": threshold,
+            "mode": mode,
+            "results": sorted_results,
+            "count": len(sorted_results),
+        },
+    }
 
 
 def _parse_plan(raw_text: str) -> dict:
@@ -94,6 +232,7 @@ Rules:
 - For make_directory use args: {{"path": "<directory path>"}}.
 - For move_file/copy_file/move_directory/copy_directory use args: {{"source_path": "...", "destination_path": "..."}}.
 - For find_directory use args: {{"name": "<directory name>"}} and optional {{"path": "<search root>"}}.
+- For sort_images_by_content use args: {{"path": "<directory>", "categories": ["cat", "dog"], "confidence_threshold": 0.7}}.
 - Do NOT use aliases like "directory_name"; always emit "name".
 - If task is ambiguous or unsafe, return an empty steps list with an explanatory plan_summary.
 """.strip()
@@ -188,7 +327,10 @@ def run_agent(query: str, directory: str):
         operation = step.get("operation", "")
         args = step.get("args", {})
 
-        step_result = execute_step(directory, operation, args)
+        if operation == "sort_images_by_content":
+            step_result = run_sort_images_by_content(base_directory=directory, args=args)
+        else:
+            step_result = execute_step(directory, operation, args)
         step_result["step_index"] = index
         step_result["reason"] = step.get("reason", "")
 

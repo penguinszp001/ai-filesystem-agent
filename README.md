@@ -46,7 +46,14 @@ Copy `.env.example`
 
 OR
 
-create new `.env` with `OPEN_AI_API_KEY=your_openai_api_key_here`
+create new `.env` with:
+
+```bash
+OPEN_AI_API_KEY=your_openai_api_key_here
+ACCESSIBLE_FILEPATH=.
+```
+
+Set `ACCESSIBLE_FILEPATH` to the directory the agent is allowed to access.
 
 ------------------------------------------------------------------------
 
@@ -67,6 +74,7 @@ http://127.0.0.1:8000
 
 -   make_directory
 -   make_file
+-   write_file
 -   move_file
 -   move_directory
 -   copy_file
@@ -77,9 +85,14 @@ http://127.0.0.1:8000
 -   list_directories
 -   find_directory
 -   read_file
+-   sort_images_by_content (LLM operation)
 
 `read_file` supports text, image, and binary files with type-aware outputs.
 The LLM now creates a plan, Python executes operations deterministically, and the LLM summarizes results (including image interpretation when requested).
+
+`sort_images_by_content` uses `read_file` + image interpretation text, then sorts images into requested categories. Low-confidence matches are sent to `other`.
+
+`classify_images` is intentionally disabled/commented out in code.
 
 ------------------------------------------------------------------------
 
