@@ -43,6 +43,34 @@ def make_file(*, base_directory: str, path: str, content: str = "") -> dict[str,
     return _result("make_file", True, f"Created file: {target}", path=str(target), bytes_written=len(content.encode("utf-8")))
 
 
+def write_file(*, base_directory: str, path: str, content: str, mode: str = "overwrite") -> dict[str, Any]:
+    target = _resolve_path(base_directory, path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    normalized_mode = (mode or "overwrite").strip().lower()
+    if normalized_mode not in {"overwrite", "append"}:
+        return _result(
+            "write_file",
+            False,
+            "Invalid mode. Use 'overwrite' or 'append'.",
+            path=str(target),
+            mode=mode,
+        )
+
+    file_mode = "a" if normalized_mode == "append" else "w"
+    with target.open(file_mode, encoding="utf-8") as handle:
+        handle.write(content)
+
+    return _result(
+        "write_file",
+        True,
+        f"Wrote to file: {target}",
+        path=str(target),
+        mode=normalized_mode,
+        bytes_written=len(content.encode("utf-8")),
+    )
+
+
 def move_file(*, base_directory: str, source_path: str, destination_path: str) -> dict[str, Any]:
     source = _resolve_path(base_directory, source_path)
     destination = _resolve_path(base_directory, destination_path)
@@ -234,6 +262,7 @@ def read_file(*, base_directory: str, path: str) -> dict[str, Any]:
 OPERATION_REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
     "make_directory": make_directory,
     "make_file": make_file,
+    "write_file": write_file,
     "move_file": move_file,
     "move_directory": move_directory,
     "copy_file": copy_file,
@@ -264,7 +293,7 @@ def execute_step(base_directory: str, operation: str, args: dict[str, Any]) -> d
                     args["path"] = args.pop(alias)
                     break
 
-    if operation == "make_file":
+    if operation in {"make_file", "write_file"}:
         if "path" not in args:
             for alias in ("filename", "name", "target"):
                 if alias in args:
