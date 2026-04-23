@@ -36,7 +36,6 @@ llm = ChatOpenAI(
     temperature=0,
 )
 
-
 def _available_operations_text() -> str:
     return "\n".join(f"- {name}" for name in OPERATION_REGISTRY.keys())
 

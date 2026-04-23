@@ -46,7 +46,14 @@ Copy `.env.example`
 
 OR
 
-create new `.env` with `OPEN_AI_API_KEY=your_openai_api_key_here`
+create new `.env` with:
+
+```bash
+OPEN_AI_API_KEY=your_openai_api_key_here
+ACCESSIBLE_FILEPATH=.
+```
+
+Set `ACCESSIBLE_FILEPATH` to the directory the agent is allowed to access.
 
 ------------------------------------------------------------------------
 
@@ -67,6 +74,7 @@ http://127.0.0.1:8000
 
 -   make_directory
 -   make_file
+-   write_file
 -   move_file
 -   move_directory
 -   copy_file
