@@ -3,11 +3,36 @@ from __future__ import annotations
 import base64
 import mimetypes
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 MAX_TEXT_CHARS = 8000
 MAX_BINARY_PREVIEW_BYTES = 4096
+
+
+def _isoformat_timestamp(value: float) -> str:
+    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+
+
+def _path_metadata(target: Path, base_directory: str) -> dict[str, Any]:
+    stats = target.stat()
+    base = Path(base_directory).resolve()
+
+    return {
+        "path": str(target),
+        "relative_path": str(target.relative_to(base)) if (target == base or base in target.parents) else str(target),
+        "exists": target.exists(),
+        "name": target.name,
+        "suffix": target.suffix,
+        "file_type": "directory" if target.is_dir() else "file" if target.is_file() else "other",
+        "size_bytes": stats.st_size,
+        "mime_type": mimetypes.guess_type(str(target))[0] or "application/octet-stream",
+        "created_at": _isoformat_timestamp(stats.st_ctime),
+        "modified_at": _isoformat_timestamp(stats.st_mtime),
+        "accessed_at": _isoformat_timestamp(stats.st_atime),
+        "permissions_octal": oct(stats.st_mode & 0o777),
+    }
 
 
 def _resolve_path(base_directory: str, path: str) -> Path:
@@ -259,6 +284,16 @@ def read_file(*, base_directory: str, path: str) -> dict[str, Any]:
     )
 
 
+def get_metadata(*, base_directory: str, path: str) -> dict[str, Any]:
+    target = _resolve_path(base_directory, path)
+
+    if not target.exists():
+        return _result("get_metadata", False, f"Path not found: {target}", path=str(target), exists=False)
+
+    metadata = _path_metadata(target, base_directory)
+    return _result("get_metadata", True, f"Collected metadata for: {target}", **metadata)
+
+
 OPERATION_REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
     "make_directory": make_directory,
     "make_file": make_file,
@@ -273,13 +308,14 @@ OPERATION_REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
     "list_directories": list_directories,
     "find_directory": find_directory,
     "read_file": read_file,
+    "get_metadata": get_metadata,
 }
 
 
 def execute_step(base_directory: str, operation: str, args: dict[str, Any]) -> dict[str, Any]:
     args = dict(args or {})
 
-    if operation in {"make_directory", "delete_directory", "delete_file", "read_file"}:
+    if operation in {"make_directory", "delete_directory", "delete_file", "read_file", "get_metadata"}:
         if "path" not in args:
             for alias in ("name", "directory", "target", "file", "filename"):
                 if alias in args:
