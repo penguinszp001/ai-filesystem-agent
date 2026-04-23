@@ -100,14 +100,71 @@ Rules:
 - For make_directory use args: {{"path": "<directory path>"}}.
 - For move_file/copy_file/move_directory/copy_directory use args: {{"source_path": "...", "destination_path": "..."}}.
 - For find_directory use args: {{"name": "<directory name>"}} and optional {{"path": "<search root>"}}.
+- For get_metadata use args: {{"path": "<file-or-directory path>"}}.
+- For list_file_metadata use args: {{"path": "<directory path>"}} to get metadata (including size_bytes) for files in a folder.
 - For inspect_images use args: {{"path": "<file-or-directory path>", "question": "<what to detect or describe>"}}.
-- inspect_images is read-only and should be used before any image-based file moving decisions.
+- inspect_images is for visual-content questions only (e.g., "what is in this image?", "which image has a cat?").
+- Never use inspect_images for file size, timestamps, MIME type, permissions, or metadata requests; use get_metadata or list_file_metadata instead.
 - Do NOT use aliases like "directory_name"; always emit "name".
 - If task is ambiguous or unsafe, return an empty steps list with an explanatory plan_summary.
 """.strip()
 
     response = llm.invoke(prompt)
-    return _parse_plan(response.content)
+    plan = _parse_plan(response.content)
+    return _normalize_plan(plan)
+
+
+def _normalize_plan(plan: dict) -> dict:
+    """Safety rewrite for common planner mistakes."""
+    steps = plan.get("steps", [])
+    if not isinstance(steps, list):
+        return plan
+
+    metadata_keywords = {
+        "metadata",
+        "size",
+        "sizes",
+        "bytes",
+        "kb",
+        "mb",
+        "mime",
+        "timestamp",
+        "permission",
+        "modified",
+        "created",
+        "accessed",
+    }
+
+    normalized_steps = []
+    rewrote = False
+    for step in steps:
+        if not isinstance(step, dict):
+            normalized_steps.append(step)
+            continue
+
+        operation = step.get("operation")
+        args = step.get("args", {}) or {}
+        question = str(args.get("question", "")).lower()
+        requests_metadata = any(keyword in question for keyword in metadata_keywords)
+
+        if operation == "inspect_images" and requests_metadata:
+            path = args.get("path", ".")
+            normalized_steps.append(
+                {
+                    "operation": "list_file_metadata",
+                    "args": {"path": path},
+                    "reason": "Metadata/size requests should use filesystem metadata operations, not visual inspection.",
+                }
+            )
+            rewrote = True
+            continue
+
+        normalized_steps.append(step)
+
+    if rewrote:
+        plan["plan_summary"] = f"{plan.get('plan_summary', '').strip()} (normalized to metadata operations)"
+    plan["steps"] = normalized_steps
+    return plan
 
 
 def _add_image_interpretations(results: list[dict]) -> list[dict]:
