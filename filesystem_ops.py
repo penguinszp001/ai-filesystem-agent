@@ -294,6 +294,27 @@ def get_metadata(*, base_directory: str, path: str) -> dict[str, Any]:
     return _result("get_metadata", True, f"Collected metadata for: {target}", **metadata)
 
 
+def list_file_metadata(*, base_directory: str, path: str = ".") -> dict[str, Any]:
+    target = _resolve_path(base_directory, path)
+
+    if not target.exists() or not target.is_dir():
+        return _result("list_file_metadata", False, f"Directory not found: {target}", path=str(target), files=[], count=0)
+
+    files: list[dict[str, Any]] = []
+    for item in sorted(target.iterdir(), key=lambda entry: entry.name.lower()):
+        if item.is_file():
+            files.append(_path_metadata(item, base_directory))
+
+    return _result(
+        "list_file_metadata",
+        True,
+        f"Collected metadata for {len(files)} file(s) in {target}",
+        path=str(target),
+        files=files,
+        count=len(files),
+    )
+
+
 OPERATION_REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
     "make_directory": make_directory,
     "make_file": make_file,
@@ -309,6 +330,7 @@ OPERATION_REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
     "find_directory": find_directory,
     "read_file": read_file,
     "get_metadata": get_metadata,
+    "list_file_metadata": list_file_metadata,
 }
 
 
@@ -322,7 +344,7 @@ def execute_step(base_directory: str, operation: str, args: dict[str, Any]) -> d
                     args["path"] = args.pop(alias)
                     break
 
-    if operation in {"list_files", "list_directories"}:
+    if operation in {"list_files", "list_directories", "list_file_metadata"}:
         if "path" not in args:
             for alias in ("directory", "target"):
                 if alias in args:
