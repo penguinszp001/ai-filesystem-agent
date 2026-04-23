@@ -6,12 +6,13 @@ from pydantic import BaseModel
 
 from chat_service import run_chat
 import os
+from pathlib import Path
+from dotenv import load_dotenv
 
 app = FastAPI()
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv()
 
 
 class QueryRequest(BaseModel):
@@ -26,7 +27,9 @@ def home():
 
 @app.get("/info")
 def info():
-    return {"directory": BASE_DIR}
+    configured_base_directory = os.getenv("ACCESSIBLE_FILEPATH", os.getcwd())
+    accessible_directory = str(Path(configured_base_directory).expanduser().resolve())
+    return {"directory": accessible_directory}
 
 
 @app.post("/chat")
