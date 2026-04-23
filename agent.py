@@ -39,9 +39,6 @@ llm = ChatOpenAI(
     temperature=0,
 )
 
-LLM_OPERATION_NAMES = ["classify_images"]
-
-
 def _available_operations_text() -> str:
     names = [*OPERATION_REGISTRY.keys(), *LLM_OPERATION_NAMES]
     return "\n".join(f"- {name}" for name in names)
