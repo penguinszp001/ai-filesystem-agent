@@ -85,9 +85,16 @@ http://127.0.0.1:8000
 -   list_directories
 -   find_directory
 -   read_file
+-   classify_images
 
 `read_file` supports text, image, and binary files with type-aware outputs.
 The LLM now creates a plan, Python executes operations deterministically, and the LLM summarizes results (including image interpretation when requested).
+
+`classify_images` can sort images into user-specified categories and routes low-confidence predictions to `other` using a confidence threshold.
+
+`read_file` image interpretation and `classify_images` are different modes:
+- interpretation: returns a rich natural-language description of one image.
+- classification: assigns an image to one of user-provided categories with confidence gating.
 
 ------------------------------------------------------------------------
 
