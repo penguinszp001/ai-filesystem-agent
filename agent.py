@@ -1,19 +1,15 @@
-import os
 import json
+import mimetypes
+import os
+import time
 import uuid
-from dotenv import load_dotenv
-import shutil
+from datetime import datetime
 from pathlib import Path
-from datetime import datetime
+
+from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from langchain.tools import tool
-from langchain.agents import create_openai_functions_agent, AgentExecutor
-from langchain_core.prompts import ChatPromptTemplate
-from pydantic import BaseModel
-from datetime import datetime
-import base64
-from PIL import Image
-from io import BytesIO
+
+from filesystem_ops import OPERATION_REGISTRY, execute_step
 
 load_dotenv()
 api_key = os.getenv("OPEN_AI_API_KEY")
@@ -23,9 +19,7 @@ api_key = os.getenv("OPEN_AI_API_KEY")
 # -----------------------------
 
 RUN_ID = str(uuid.uuid4())
-
 os.makedirs("logs", exist_ok=True)
-
 log_filename = f"logs/run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{RUN_ID}.jsonl"
 
 
@@ -38,356 +32,101 @@ def log_event(event: dict):
         f.write(json.dumps(event) + "\n")
 
 
-def format_bytes(size: int) -> str:
-    for unit in ["B", "KB", "MB", "GB"]:
-        if size < 1024:
-            return f"{size:.2f}{unit}"
-        size /= 1024
-    return f"{size:.2f}TB"
-
-
-def encode_image(path: str) -> str:
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
+llm = ChatOpenAI(
+    api_key=api_key,
+    model="gpt-4o-mini",
+    temperature=0,
+)
+
+# Operations that are handled directly in this module (not by filesystem_ops).
+LLM_OPERATION_NAMES: list[str] = ["inspect_images"]
+
+
+def _available_operations_text() -> str:
+    names = [*OPERATION_REGISTRY.keys(), *LLM_OPERATION_NAMES]
+    return "\n".join(f"- {name}" for name in names)
+
+
+def _parse_plan(raw_text: str) -> dict:
+    """Accept plain JSON or fenced JSON and return dict."""
+    cleaned = raw_text.strip()
+
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+
+    parsed = json.loads(cleaned)
+
+    if not isinstance(parsed, dict) or "steps" not in parsed:
+        raise ValueError("Plan must be a JSON object containing a 'steps' list.")
+
+    steps = parsed.get("steps", [])
+    if not isinstance(steps, list):
+        raise ValueError("'steps' must be a list.")
+
+    return parsed
+
+
+def make_plan(query: str, base_directory: str) -> dict:
+    prompt = f"""
+You are a planning assistant for deterministic filesystem automation.
+
+Base directory: {base_directory}
+
+Available operations:
+{_available_operations_text()}
+
+Task:
+Create a concise execution plan for this user request:
+{query}
+
+Return ONLY valid JSON (no markdown) in this schema:
+{{
+  "plan_summary": "short plain-language plan",
+  "steps": [
+    {{
+      "operation": "one available operation name",
+      "args": {{"argument_name": "value"}},
+      "reason": "why this step is needed"
+    }}
+  ]
+}}
+
+Rules:
+- Use only listed operation names.
+- Prefer relative paths under the base directory.
+- Keep steps minimal and deterministic.
+- For make_directory use args: {{"path": "<directory path>"}}.
+- For move_file/copy_file/move_directory/copy_directory use args: {{"source_path": "...", "destination_path": "..."}}.
+- For find_directory use args: {{"name": "<directory name>"}} and optional {{"path": "<search root>"}}.
+- For inspect_images use args: {{"path": "<file-or-directory path>", "question": "<what to detect or describe>"}}.
+- inspect_images is read-only and should be used before any image-based file moving decisions.
+- Do NOT use aliases like "directory_name"; always emit "name".
+- If task is ambiguous or unsafe, return an empty steps list with an explanatory plan_summary.
+""".strip()
+
+    response = llm.invoke(prompt)
+    return _parse_plan(response.content)
+
+
+def _add_image_interpretations(results: list[dict]) -> list[dict]:
+    """Add concise image interpretations to successful read_file image results."""
+    enriched: list[dict] = []
+
+    for result in results:
+        cloned = json.loads(json.dumps(result))
+        details = cloned.get("details", {})
+
+        if (
+            cloned.get("operation") == "read_file"
+            and cloned.get("ok")
+            and details.get("file_kind") == "image"
+            and details.get("data_base64")
+        ):
+            mime_type = details.get("mime_type", "image/png")
+            base64_data = details.get("data_base64")
 
-
-# -----------------------------
-# Tools
-# -----------------------------
-
-@tool
-def read_file(path: str) -> str:
-    """Read a file from disk."""
-    try:
-        with open(path, "r") as f:
-            content = f.read()
-
-        log_event({
-            "type": "tool_result",
-            "tool": "read_file",
-            "input": {"path": path},
-            "output": content
-        })
-
-        return content
-
-    except Exception as e:
-        error = f"Error: {e}"
-
-        log_event({
-            "type": "tool_result_error",
-            "tool": "read_file",
-            "input": {"path": path},
-            "error": error
-        })
-
-        return error
-
-
-class WriteFileInput(BaseModel):
-    filename: str
-    content: str
-
-
-@tool(args_schema=WriteFileInput)
-def write_file(filename: str, content: str) -> str:
-    """Write content to a file."""
-    try:
-        with open(filename, "w") as f:
-            f.write(content)
-
-        message = f"File '{filename}' written."
-
-        log_event({
-            "type": "tool_call",
-            "tool": "write_file",
-            "input": {"filename": filename, "content": content},
-            "output": message
-        })
-
-        return message
-
-    except Exception as e:
-        error = f"Error: {e}"
-
-        log_event({
-            "type": "tool_call_error",
-            "tool": "write_file",
-            "input": {"filename": filename, "content": content},
-            "error": error
-        })
-
-        return error
-
-
-@tool
-def list_files(directory: str) -> str:
-    """List all files in a directory."""
-    try:
-        files = os.listdir(directory)
-        result = "\n".join(files)
-
-        log_event({
-            "type": "tool_call",
-            "tool": "list_files",
-            "input": {"directory": directory},
-            "output": result
-        })
-
-        return result
-
-    except Exception as e:
-        error = f"Error: {e}"
-
-        log_event({
-            "type": "tool_call_error",
-            "tool": "list_files",
-            "input": {"directory": directory},
-            "error": error
-        })
-
-        return error
-
-
-@tool
-def find_directory(name: str, start_path: str = ".") -> str:
-    """
-    Search for directories by name starting from a base path.
-    Returns matching directory paths.
-    """
-
-    matches = []
-
-    try:
-        for root, dirs, _ in os.walk(start_path):
-            for d in dirs:
-                if name.lower() in d.lower():
-                    full_path = os.path.join(root, d)
-                    matches.append(full_path)
-
-        if not matches:
-            result = f"No directories found matching '{name}'"
-        else:
-            result = "\n".join(matches)
-
-        log_event({
-            "type": "tool_call",
-            "tool": "find_directory",
-            "input": {"name": name, "start_path": start_path},
-            "output": result
-        })
-
-        return result
-
-    except Exception as e:
-        error = f"Error: {e}"
-
-        log_event({
-            "type": "tool_call_error",
-            "tool": "find_directory",
-            "input": {"name": name, "start_path": start_path},
-            "error": error
-        })
-
-        return error
-
-
-@tool
-def file_metadata(path: str) -> str:
-    """
-    Get metadata about a file: size, created time, modified time.
-    """
-    try:
-        p = Path(path)
-
-        if not p.exists():
-            return f"File not found: {path}"
-
-        stats = p.stat()
-
-        created = datetime.fromtimestamp(stats.st_ctime)
-        modified = datetime.fromtimestamp(stats.st_mtime)
-        size = stats.st_size
-
-        result = {
-            "path": str(p.resolve()),
-            "size_bytes": size,
-            "size_readable": format_bytes(size),
-            "created": created.isoformat(),
-            "modified": modified.isoformat()
-        }
-
-        log_event({
-            "type": "tool_call",
-            "tool": "file_metadata",
-            "input": {"path": path},
-            "output": result
-        })
-
-        return str(result)
-
-    except Exception as e:
-        error = f"Error: {e}"
-
-        log_event({
-            "type": "tool_call_error",
-            "tool": "file_metadata",
-            "input": {"path": path},
-            "error": error
-        })
-
-        return error
-
-
-@tool
-def list_files_with_metadata(directory: str) -> str:
-    """
-    List all files in a directory with metadata (size, modified time).
-    """
-
-    try:
-        results = []
-
-        for name in os.listdir(directory):
-            full_path = os.path.join(directory, name)
-
-            if os.path.isfile(full_path):
-                stats = os.stat(full_path)
-
-                results.append({
-                    "name": name,
-                    "path": full_path,
-                    "size_bytes": stats.st_size,
-                    "modified": datetime.fromtimestamp(stats.st_mtime).isoformat()
-                })
-
-        log_event({
-            "type": "tool_call",
-            "tool": "list_files_with_metadata",
-            "input": {"directory": directory},
-            "output": results
-        })
-
-        return str(results)
-
-    except Exception as e:
-        return f"Error: {e}"
-
-
-@tool
-def analyze_image(path: str) -> str:
-    """
-    Analyze an image using OpenAI vision model.
-    """
-
-    try:
-        base64_image = encode_image(path)
-
-        response = llm.invoke([
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Describe this image in detail."},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{base64_image}"
-                        }
-                    }
-                ]
-            }
-        ])
-
-        log_event({
-            "type": "tool_call",
-            "tool": "analyze_image",
-            "input": {"path": path},
-            "output": response.content
-        })
-
-        return response.content
-
-    except Exception as e:
-        error = f"Error: {e}"
-
-        log_event({
-            "type": "tool_call_error",
-            "tool": "analyze_image",
-            "input": {"path": path},
-            "error": error
-        })
-
-        return error
-
-
-@tool
-def sort_images_by_type(directory: str) -> str:
-    """
-    Sort images in a directory into folders by file type (png, jpg, etc).
-    """
-
-    try:
-        p = Path(directory)
-
-        if not p.exists():
-            return f"Directory not found: {directory}"
-
-        moved = []
-
-        for file in p.iterdir():
-            if file.is_file():
-                ext = file.suffix.lower().replace(".", "")
-
-                if ext in ["png", "jpg", "jpeg"]:
-                    target_dir = p / ext
-                    target_dir.mkdir(exist_ok=True)
-
-                    target_path = target_dir / file.name
-                    shutil.copy2(file, target_path)
-
-                    moved.append(f"{file.name} → {ext}/")
-
-        return "\n".join(moved) if moved else "No images found."
-
-    except Exception as e:
-        return f"Error: {e}"
-
-
-@tool
-def sort_images_by_content(directory: str, categories: list[str]) -> str:
-    """
-    Analyze images and sort them into user-defined categories.
-    Always includes an 'other' category for low-confidence matches.
-    """
-
-    import shutil
-    from pathlib import Path
-
-    try:
-        if not categories or len(categories) > 4:
-            return "Error: You must provide between 1 and 4 categories."
-
-        # Normalize + enforce 'other'
-        categories = [c.lower().strip() for c in categories]
-        if "other" not in categories:
-            categories.append("other")
-
-        p = Path(directory)
-
-        if not p.exists():
-            return f"Directory not found: {directory}"
-
-        results = []
-        category_list = ", ".join([c for c in categories if c != "other"])
-
-        for file in p.iterdir():
-
-            if file.suffix.lower() not in [".png", ".jpg", ".jpeg"]:
-                continue
-
-            base64_image = encode_image(str(file))
-
-            # 🔥 Ask for structured + confidence output
             response = llm.invoke([
                 {
                     "role": "user",
@@ -395,185 +134,221 @@ def sort_images_by_content(directory: str, categories: list[str]) -> str:
                         {
                             "type": "text",
                             "text": (
-                                f"Classify this image into ONE of these categories:\n"
-                                f"{category_list}\n\n"
-                                f"Return a JSON object like:\n"
-                                f'{{"category": "<category>", "confidence": <0-1>}}\n\n'
-                                f"If the image does not clearly match one category, return:\n"
-                                f'{{"category": "other", "confidence": <low_value>}}\n'
-                                f"Only return JSON."
-                            )
+                                "Interpret what is in this image in 1-3 concise sentences. "
+                                "Focus only on visible content and avoid categorizing or sorting."
+                            ),
                         },
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/png;base64,{base64_image}"
-                            }
-                        }
-                    ]
+                                "url": f"data:{mime_type};base64,{base64_data}",
+                            },
+                        },
+                    ],
                 }
             ])
 
-            raw = response.content.strip()
+            details["interpretation"] = response.content
+            details["data_base64"] = "[omitted in summary payload]"
 
-            # 🔒 Safe parsing
-            import json
-            try:
-                parsed = json.loads(raw)
-                label = parsed.get("category", "other").lower()
-                confidence = float(parsed.get("confidence", 0))
-            except:
-                label = "other"
-                confidence = 0
+        enriched.append(cloned)
 
-            # 🔥 Enforce "squishy" behavior
-            if label not in categories or label == "other" or confidence < 0.7:
-                label = "other"
-
-            target_dir = p / label
-            target_dir.mkdir(exist_ok=True)
-
-            target_path = target_dir / file.name
-            shutil.copy2(file, target_path)
-
-            results.append(f"{file.name} → {label}/ (confidence: {confidence:.2f})")
-
-        # 👇 Explain behavior to user explicitly
-        summary_note = (
-            "\n\nNote: Images are only placed into specific categories when the model is confident. "
-            "Otherwise, they are placed into the 'other' folder."
-        )
-
-        return ("\n".join(results) if results else "No images processed.") + summary_note
-
-    except Exception as e:
-        return f"Error: {e}"
+    return enriched
 
 
-# -----------------------------
-# LLM
-# -----------------------------
-
-llm = ChatOpenAI(
-    api_key=api_key,
-    model="gpt-4o-mini",
-    temperature=0
-)
+def _is_image_file(path: Path) -> bool:
+    mime_type, _ = mimetypes.guess_type(str(path))
+    return bool(mime_type and mime_type.startswith("image/"))
 
 
-prompt = ChatPromptTemplate.from_messages([
-    ("system",
-     """You are a file assistant working inside a local filesystem.
-    You can:
-    - read files
-    - list directories
-    - search for directories
-    - analyze images
-    
-    Always assume the base directory is the working directory unless otherwise specified.
-    When searching, use tools like find_directory.
-    You can list files along with metadata using list_files_with_metadata. 
-    Use this instead of calling file_metadata repeatedly.
-    You can organize files using tools:
-    - sort_images_by_type for file extensions
-    - sort_images_by_content for AI-based classification
-    Use these tools instead of manually iterating over files.
-    When organizing images:
-    - Ask the user to specify, or infer categories from the request
-    - Pass categories explicitly into sort_images_by_content
-    - Do not invent extra categories beyond what the user asked
-    - If the user asks for more than 4 categories, request that they reduce it to at most 4"""),
-    ("human", "{input}"),
-    ("placeholder", "{agent_scratchpad}")
-])
+def _inspect_images(base_directory: str, args: dict) -> dict:
+    path_arg = args.get("path", ".")
+    question = (args.get("question") or "Describe what is visible in the image.").strip()
+    resolved = Path(base_directory).resolve() / path_arg if not Path(path_arg).is_absolute() else Path(path_arg).resolve()
+    base = Path(base_directory).resolve()
 
-tools = [
-    read_file,
-    write_file,
-    list_files_with_metadata,
-    file_metadata,
-    analyze_image,
-    find_directory,
-    sort_images_by_type,
-    sort_images_by_content
-]
+    if not (resolved == base or base in resolved.parents):
+        return {
+            "operation": "inspect_images",
+            "ok": False,
+            "message": f"Path '{path_arg}' resolves outside the allowed base directory.",
+            "details": {"path": str(resolved), "question": question},
+        }
 
-agent = create_openai_functions_agent(llm, tools, prompt)
+    if not resolved.exists():
+        return {
+            "operation": "inspect_images",
+            "ok": False,
+            "message": f"Path not found: {resolved}",
+            "details": {"path": str(resolved), "question": question},
+        }
 
-agent_executor = AgentExecutor(
-    agent=agent,
-    tools=tools,
-    verbose=False,
-    return_intermediate_steps=True,
-    max_iterations=20
-)
+    image_paths: list[Path] = []
+    if resolved.is_file():
+        if _is_image_file(resolved):
+            image_paths = [resolved]
+    else:
+        image_paths = sorted(path for path in resolved.rglob("*") if path.is_file() and _is_image_file(path))
+
+    if not image_paths:
+        return {
+            "operation": "inspect_images",
+            "ok": True,
+            "message": "No image files found to inspect.",
+            "details": {"path": str(resolved), "question": question, "matches": [], "count": 0},
+        }
+
+    analyses: list[dict] = []
+    for image_path in image_paths:
+        relative_path = str(image_path.relative_to(base))
+        read_result = execute_step(base_directory, "read_file", {"path": relative_path})
+
+        if not read_result.get("ok"):
+            analyses.append({"path": relative_path, "ok": False, "error": read_result.get("message", "Unable to read image.")})
+            continue
+
+        details = read_result.get("details", {})
+        mime_type = details.get("mime_type", "image/png")
+        base64_data = details.get("data_base64", "")
+
+        response = llm.invoke([
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "You are analyzing a local image for filesystem automation. "
+                            "Answer with JSON only in this schema: "
+                            "{\"summary\": \"1-2 sentence visible description\", "
+                            "\"matches_request\": true/false, "
+                            "\"evidence\": \"short reason for your decision\"}. "
+                            f"Request to evaluate: {question}"
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime_type};base64,{base64_data}"},
+                    },
+                ],
+            }
+        ])
+
+        try:
+            parsed = json.loads(response.content.strip().strip("`").replace("json\n", "", 1))
+            analyses.append(
+                {
+                    "path": relative_path,
+                    "ok": True,
+                    "summary": parsed.get("summary", ""),
+                    "matches_request": bool(parsed.get("matches_request")),
+                    "evidence": parsed.get("evidence", ""),
+                }
+            )
+        except Exception:
+            analyses.append(
+                {
+                    "path": relative_path,
+                    "ok": True,
+                    "summary": str(response.content).strip(),
+                    "matches_request": False,
+                    "evidence": "Model response was not valid JSON; treated as non-match for safety.",
+                }
+            )
+
+    matches = [item["path"] for item in analyses if item.get("ok") and item.get("matches_request")]
+    return {
+        "operation": "inspect_images",
+        "ok": True,
+        "message": f"Inspected {len(analyses)} image(s); {len(matches)} matched the request.",
+        "details": {
+            "path": str(resolved),
+            "question": question,
+            "results": analyses,
+            "matches": matches,
+            "count": len(analyses),
+            "matches_count": len(matches),
+        },
+    }
 
 
-# -----------------------------
-# MAIN ENTRYPOINT FOR WEB
-# -----------------------------
+def summarize_execution(query: str, plan: dict, results: list[dict]) -> str:
+    prompt = f"""
+You are a concise assistant summarizing filesystem execution.
+
+Original user request:
+{query}
+
+Plan JSON:
+{json.dumps(plan, indent=2)}
+
+Execution results JSON:
+{json.dumps(results, indent=2)}
+
+Respond with:
+1) What was planned.
+2) What was executed.
+3) Success/failure status per step.
+4) Final concise outcome.
+""".strip()
+
+    response = llm.invoke(prompt)
+    return response.content
+
 
 def run_agent(query: str, directory: str):
-    """
-    Called by web server.
-    """
+    start_time = time.time()
 
     log_event({
         "type": "run_start",
         "input": query,
-        "directory": directory
+        "directory": directory,
     })
 
-    result = agent_executor.invoke({
-        "input": query
-    })
+    try:
+        plan = make_plan(query=query, base_directory=directory)
+        log_event({"type": "plan_created", "plan": plan})
+    except Exception as exc:
+        error_message = f"Failed to create plan: {exc}"
+        log_event({"type": "plan_error", "error": error_message})
+        return error_message
 
-    log_event({
-        "type": "run_end",
-        "output": result["output"]
-    })
+    results = []
+    for index, step in enumerate(plan.get("steps", []), start=1):
+        operation = step.get("operation", "")
+        args = step.get("args", {})
 
-    return result["output"]
-
-
-# -----------------------------
-# Run
-# -----------------------------
-
-if __name__ == "__main__":
-
-    query = """
-    Look in the folder 'data'.
-    Read all text files.
-    Summarize each one in 3 sentences.
-    Then write a combined summary to 'summarize_files.txt'.
-    """
-
-    # Log run start
-    log_event({
-        "type": "run_start",
-        "input": query
-    })
-
-    result = agent_executor.invoke({"input": query})
-
-    # Log final output
-    log_event({
-        "type": "run_end",
-        "output": result["output"]
-    })
-
-    # Log intermediate reasoning steps
-    for step in result["intermediate_steps"]:
-        action, observation = step
+        if operation == "inspect_images":
+            step_result = _inspect_images(directory, args)
+        else:
+            step_result = execute_step(directory, operation, args)
+        step_result["step_index"] = index
+        step_result["reason"] = step.get("reason", "")
 
         log_event({
-            "type": "agent_action",
-            "tool": action.tool,
-            "stage": "planning",
-            "input": action.tool_input,
-            "output": observation
+            "type": "execution_step",
+            "step_index": index,
+            "operation": operation,
+            "args": args,
+            "result": step_result,
         })
+        results.append(step_result)
 
-    print("Run complete.")
-    print("Logs saved to:", log_filename)
+    enriched_results = _add_image_interpretations(results)
+    output = summarize_execution(query=query, plan=plan, results=enriched_results)
+
+    duration = time.time() - start_time
+
+    log_event({
+        "type": "chat_turn",
+        "user_input": query,
+        "agent_output": output[:2500],
+        "duration_seconds": round(duration, 3),
+    })
+
+    log_event({
+        "type": "run_end",
+        "output": output,
+    })
+
+    return output

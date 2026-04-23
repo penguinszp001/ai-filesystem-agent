@@ -1,102 +1,27 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>File Agent</title>
-
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 20px;
-            max-width: 900px;
-        }
-
-        textarea {
-            width: 100%;
-            max-width: 100%;
-        }
-
-        #output {
-            margin-top: 20px;
-            padding: 12px;
-            background: #111;
-            color: #eee;
-            border-radius: 6px;
-
-            /* 🔥 key fix */
-            white-space: pre-wrap;     /* wrap long lines */
-            word-wrap: break-word;     /* break long strings */
-            overflow-x: hidden;        /* no horizontal scroll */
-        }
-
-        #status {
-            margin-top: 10px;
-            font-weight: bold;
-        }
-
-        button {
-            margin-top: 10px;
-        }
-    </style>
+    <title>AI File Agent</title>
+    <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
 
-<h2>File Agent UI</h2>
+<div class="container">
+    <h2>🧠 File Agent</h2>
 
-<p id="dir"></p>
+    <div id="directory"></div>
 
-<textarea id="query" rows="5" cols="60"
-placeholder="Ask me to summarize files or directories..."></textarea>
+    <div id="chat"></div>
 
-<br><br>
+    <div class="input-row">
+        <input id="input" placeholder="Ask something..." />
+        <button id="sendBtn">Send</button>
+    </div>
 
-<button onclick="send()">Submit</button>
+    <div id="status"></div>
+</div>
 
-<p id="status"></p>
-
-<pre id="output"></pre>
-
-<script>
-
-let currentDir = null;
-
-async function init() {
-    const res = await fetch("/info");
-    const data = await res.json();
-
-    currentDir = data.directory;
-
-    document.getElementById("dir").innerText =
-        "You are currently in this file directory: " + currentDir;
-}
-
-init();
-
-document.getElementById("dir").innerText =
-    "You are currently in this file directory: " + currentDir;
-
-async function send() {
-
-    const query = document.getElementById("query").value;
-
-    document.getElementById("status").innerText = "Running agent...";
-    document.getElementById("output").innerText = "";
-
-    const res = await fetch("/query", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({
-            query: query,
-            directory: currentDir
-        })
-    });
-
-    const data = await res.json();
-
-    document.getElementById("status").innerText = "Done ✅";
-    document.getElementById("output").innerText = data.result;
-}
-
-</script>
+<script src="/static/app.js" defer></script>
 
 </body>
 </html>
